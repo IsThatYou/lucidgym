@@ -1,0 +1,13 @@
+# Demonstrates wiring the TextArena env/agent pair into AgentTrainer.
+
+rllm:
+  workflow_class: "multi_turn_workflow"
+  agent_class: "textarena_agent"
+  env_class: "textarena_env"
+  agent_args:
+    system_prompt: |
+      You are playing a TextArena game. Produce concise bracketed actions such as `[Up]` or `[Place x y]`.
+  env_args:
+    env_id: "TicTacToe-v0-train"
+    num_players: 2
+    reward_aggregation: "mean"

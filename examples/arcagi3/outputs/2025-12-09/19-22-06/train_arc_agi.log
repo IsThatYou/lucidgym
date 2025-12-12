@@ -1,0 +1,2 @@
+[2025-12-09 19:22:06,904][rllm.data.dataset][INFO] - Loaded dataset 'arcagi3-as66' split 'train' with 500 examples.
+[2025-12-09 19:22:06,911][rllm.data.dataset][INFO] - Loaded dataset 'arcagi3-as66' split 'test' with 1 examples.

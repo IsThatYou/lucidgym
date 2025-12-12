@@ -1,0 +1,25 @@
+# Example config showing how to wire LucidGym components into AgentTrainer.
+#
+# Phase 1 focuses on discoverability, so the template keeps the standard
+# rllm trainer + workflow classes but swaps in LucidGym registry keys.
+#
+# Usage sketch (pseudo-code):
+# >>> from lucidgym import register_lucidgym_components
+# >>> register_lucidgym_components()
+# >>> trainer = AgentTrainer(
+# ...     workflow_class="lucidgym_placeholder_workflow",
+# ...     agent_class="lucidgym_placeholder_agent",
+# ...     env_class="lucidgym_placeholder_env",
+# ... )
+#
+# Replace the placeholder keys once the real Gymnasium/TextArena/ARC
+# implementations land.
+
+rllm:
+  workflow_class: "lucidgym_placeholder_workflow"
+  agent_class: "lucidgym_placeholder_agent"
+  env_class: "lucidgym_placeholder_env"
+  agent_args: {}
+  env_args:
+    task:
+      description: "Placeholder task routed through LucidGym."

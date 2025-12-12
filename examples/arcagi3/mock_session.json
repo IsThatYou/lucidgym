@@ -1,0 +1,78 @@
+{
+  "reset": {
+    "game_id": "ARC-demo-game",
+    "frame": [
+      [[0, 0, 0], [0, 0, 0]],
+      [[255, 255, 255], [128, 128, 128]]
+    ],
+    "state": "NOT_FINISHED",
+    "score": 0,
+    "action_input": {
+      "id": "RESET",
+      "data": {"game_id": "ARC-demo-game"},
+      "reasoning": null
+    },
+    "guid": "mock-guid-0",
+    "full_reset": true,
+    "available_actions": ["ACTION1", "ACTION6"]
+  },
+  "steps": [
+    {
+      "action": "ACTION1",
+      "payload": {},
+      "response": {
+        "game_id": "ARC-demo-game",
+        "frame": [
+          [[0, 0, 0], [0, 0, 0]],
+          [[255, 255, 255], [0, 0, 0]]
+        ],
+        "state": "NOT_FINISHED",
+        "score": 1,
+        "action_input": {
+          "id": "ACTION1",
+          "data": {"game_id": "ARC-demo-game"},
+          "reasoning": {"thought": "Toggled a pixel"}
+        },
+        "guid": "mock-guid-1",
+        "full_reset": false,
+        "available_actions": ["ACTION6"]
+      }
+    },
+    {
+      "action": "ACTION6",
+      "payload": {"x": 1, "y": 1},
+      "response": {
+        "game_id": "ARC-demo-game",
+        "frame": [
+          [[0, 0, 0], [0, 0, 0]],
+          [[255, 255, 255], [0, 0, 0]]
+        ],
+        "state": "WIN",
+        "score": 3,
+        "action_input": {
+          "id": "ACTION6",
+          "data": {"game_id": "ARC-demo-game", "x": 1, "y": 1},
+          "reasoning": {"thought": "Final placement"}
+        },
+        "guid": "mock-guid-2",
+        "full_reset": false,
+        "available_actions": ["ACTION1"]
+      }
+    }
+  ],
+  "scorecard": {
+    "card_id": "ARC-demo-card",
+    "api_key": "",
+    "cards": {
+      "ARC-demo-game": {
+        "game_id": "ARC-demo-game",
+        "total_plays": 1,
+        "guids": ["mock-guid-2"],
+        "scores": [3],
+        "states": ["WIN"],
+        "actions": [2],
+        "resets": [1]
+      }
+    }
+  }
+}

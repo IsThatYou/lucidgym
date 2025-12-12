@@ -1,0 +1,19 @@
+# Smoke-test configuration that runs ARC-AGI-3 in mock/offline mode.
+
+rllm:
+  workflow_class: "multi_turn_workflow"
+  agent_class: "arcagi3_agent"
+  env_class: "arcagi3_env"
+  agent_args:
+    mode: "llm"
+    system_prompt: |
+      You are piloting a mock ARC-AGI-3 level. Return concise JSON objects such as
+      {"action": "ACTION1"} or {"action": "ACTION6", "x": 12, "y": 3}.
+  env_args:
+    card_id: "ARC-demo-card"
+    game_id: "ARC-demo-game"
+    root_url: "http://mock.arc.local"
+    mock_session_path: "examples/arcagi3/mock_session.json"
+    include_grid_ascii: true
+    include_grid_flat: false
+    reward_mode: "delta_score"

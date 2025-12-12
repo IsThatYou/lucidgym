@@ -1,0 +1,22 @@
+# Batch evaluation template for ARC-AGI-3 cards/games.
+
+rllm:
+  workflow_class: "multi_turn_workflow"
+  agent_class: "arcagi3_agent"
+  env_class: "arcagi3_env"
+  agent_args:
+    mode: "passthrough"
+    system_prompt: null  # passthrough mode ignores the prompt.
+  env_args:
+    card_id: "${oc.env:ARC_CARD_ID,ARC-demo-card}"
+    game_id: "${oc.env:ARC_GAME_ID,ARC-demo-game}"
+    root_url: "${oc.env:ARC_ROOT_URL,http://localhost:8000}"
+    max_actions: 80
+    reward_mode: "delta_score"
+
+# Downstream scripts can iterate over this list and pass entries to env.reset(task=...).
+arcagi3_tasks:
+  - game_id: "ARC-demo-game"
+    max_actions: 40
+  - game_id: "ARC-another-game"
+    max_actions: 60

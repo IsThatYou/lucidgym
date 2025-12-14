@@ -27,9 +27,9 @@ if str(project_root) not in sys.path:
 load_dotenv(dotenv_path=project_root / ".env.example")
 load_dotenv(dotenv_path=project_root / ".env", override=True)
 
-from agents.structs import GameAction
-from agents.templates.as66.downsample import downsample_4x4, matrix16_to_lines
-from agents.templates.meta_agent_prompts import (
+from lucidgym.environments.arcagi3.structs import GameAction
+from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
+from lucidgym.prompts.meta_prompts import (
     PROMPT_AS66_RULES,
     PROMPT_GENERAL_ARC_RULES,
     PROMPT_SYSTEM_INSTRUCTION,
@@ -39,9 +39,9 @@ from agents.templates.meta_agent_prompts import (
     PROMPT_CONDENSER_SYSTEM
 )
 
-from evaluation.metrics import GameMetrics, LevelMetrics, AttemptMetrics
-from evaluation.report import save_summary_report, calculate_stats
-from evaluation.config import EVALUATION_GAMES
+from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
+from lucidgym.metrics.reporting import save_summary_report, calculate_stats
+from lucidgym.evaluation.config import EVALUATION_GAMES
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -109,7 +109,7 @@ class GeneratedHeuristicAgent:
         return r'''import random
 from typing import Any, Dict, List, Optional
 import logging
-from agents.templates.as66.downsample import downsample_4x4, matrix16_to_lines
+from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
 
 log = logging.getLogger(__name__)
 

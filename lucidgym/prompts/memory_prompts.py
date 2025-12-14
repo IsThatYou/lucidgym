@@ -1,9 +1,13 @@
-# agents/templates/as66/prompts_memory.py
+"""
+Hypothesis-based memory prompts for memory-guided agents.
+Supports initial hypothesis generation, updates, observations, and action selection.
+"""
 from __future__ import annotations
 from typing import List
-from .downsample import matrix16_to_lines
 
-# --- Initial Hypothesis Generation ---
+from lucidgym.utils.grid_processing import matrix16_to_lines
+
+# Initial Hypothesis Generation
 
 def build_initial_hypotheses_system_prompt() -> str:
     """System prompt for generating the first set of hypotheses."""
@@ -18,13 +22,12 @@ def build_initial_hypotheses_system_prompt() -> str:
         "**For each of the five hypotheses, you must provide:**\n"
         "1.  **A Detailed Paragraph:** Describe the hypothesis. What do different integers represent (player, wall, goal, empty space)? How do they interact? How does movement work?\n"
         "2.  **A Concrete Test:** Propose a specific, unambiguous test. This must include:\n"
-        "    - The exact action to take (e.g., `ACTION1` or `ACTION6` with a coordinate).\n"
-        "    - A precise, falsifiable prediction of the outcome. For example: \"If this hypothesis is true, taking `ACTION1` should cause the integer `6` at row `8`, column `5` to move to row `7`, column `5`.\"\n\n"
+        "    - The exact action to take (e.g., ACTION1 or ACTION6 with a coordinate).\n"
+        "    - A precise, falsifiable prediction of the outcome. For example: If this hypothesis is true, taking ACTION1 should cause the integer 6 at row 8, column 5 to move to row 7, column 5.\n\n"
         "Your goal is to create a scientific framework for understanding the game. These initial hypotheses will be refined after every move.\n\n"
         "Initialize a confidence score out of 10 for each one with some number between 1-3 as we haven't seen any actions yet.\n\n"
-        "---\n\n"
-        "### **Critical Analysis Rules**\n"
-        "**Coordinate System (Indexing):** All grid coordinates are specified as `(row, column)`. The origin `(0, 0)` is the top-left corner of the matrix. Row numbers increase as you go down, and column numbers increase as you go to the right. Be precise."
+        "**Critical Analysis Rules**\n"
+        "**Coordinate System:** All grid coordinates are specified as (row, column). The origin (0, 0) is the top-left corner of the matrix. Row numbers increase as you go down, and column numbers increase as you go to the right. Be precise."
     )
 
 def build_initial_hypotheses_user_prompt(ds16: List[List[int]]) -> str:
@@ -33,12 +36,10 @@ def build_initial_hypotheses_user_prompt(ds16: List[List[int]]) -> str:
     return (
         "Here is the initial state of the game board. Please generate five initial hypotheses about the game's rules, structure, and objectives, each with a concrete test case.\n\n"
         "**Initial Board State (16x16 Matrix):**\n"
-        "```\n"
         f"{grid_txt}\n"
-        "```"
     )
 
-# --- Hypothesis Update ---
+# Hypothesis Update
 
 def build_update_hypotheses_system_prompt() -> str:
     """System prompt for the hypothesis update step."""
@@ -53,10 +54,9 @@ def build_update_hypotheses_system_prompt() -> str:
         "**For each of your five new hypotheses, provide:**\n"
         "1.  **A Detailed Paragraph:** Describe your refined understanding of the rule.\n"
         "2.  **A Concrete Test:** Propose a new, specific action and a falsifiable prediction to further test this refined hypothesis.\n"
-        "3.  **A Confidence Score:** Provide a score out of 10 (e.g., `Confidence: 4/10`). Be cautious: only raise scores above 6/10 if a hypothesis has been repeatedly verified by good evidence (4+ successful predictions). Start new or radically changed hypotheses with low confidence.\n\n"
+        "3.  **A Confidence Score:** Provide a score out of 10 (e.g., Confidence: 4/10). Be cautious: only raise scores above 6/10 if a hypothesis has been repeatedly verified by good evidence (4+ successful predictions). Start new or radically changed hypotheses with low confidence.\n\n"
         "Your output must be a markdown-formatted list of the five new hypotheses. Do not include any other text.\n\n"
-        "---\n\n"
-        "### **Available Actions for Tests**\n"
+        "**Available Actions for Tests**\n"
         "When proposing a test, you must use one of the following valid action names:\n"
         "* `ACTION1`: Move Up\n"
         "* `ACTION2`: Move Down\n"
@@ -64,9 +64,9 @@ def build_update_hypotheses_system_prompt() -> str:
         "* `ACTION4`: Move Right\n"
         "* `ACTION5`: Spacebar / Enter / No-op\n"
         "* `ACTION6`: Click(x, y) at a specific coordinate\n\n"
-        "**Only `ACTION6` requires a coordinate, as it is a targeted click, while the others alter the general board state.**\n\n"
-        "### **General Game Analysis Advice**\n"
-        "**Coordinate System (Indexing):** All grid coordinates are specified as `(row, column)`. The origin `(0, 0)` is the top-left corner of the matrix. Row numbers increase as you go down, and column numbers increase as you go to the right. Be precise when referencing locations.\n\n"
+        "Only ACTION6 requires a coordinate, as it is a targeted click, while the others alter the general board state.\n\n"
+        "**General Game Analysis Advice**\n"
+        "**Coordinate System:** All grid coordinates are specified as (row, column). The origin (0, 0) is the top-left corner of the matrix. Row numbers increase as you go down, and column numbers increase as you go to the right. Be precise when referencing locations.\n\n"
         "Treat any group of identical integers where members share an edge as a **single, continuous object**, regardless of its overall shape. This principle is inductive: if integer `A` touches an identical integer `B`, and `B` touches `C`, then `A`, `B`, and `C` are all part of the same object.\n\n"
         "Integers that appear rarely or only once are often **critical elements**. They might represent the player character, a key, an exit, or a special interactive object. Track their positions closely.\n\n"
         "Many games place important information like a **move counter** along the **edges of the game board**. Look for integers in these boundary areas that change consistently with each action you take.\n\n"
@@ -85,7 +85,7 @@ def build_update_hypotheses_user_prompt(memory_content: str) -> str:
         f"{memory_content}"
     )
 
-# --- Observation Step ---
+# Observation Step
 
 def build_observation_system_prompt() -> str:
     """System prompt for the observation step, which now generates a text rationale."""
@@ -121,7 +121,7 @@ def build_observation_user_prompt(memory_content: str, ds16: List[List[int]], sc
         "Follow your reasoning process and provide a detailed text analysis, concluding with your recommended action. Be precise with all coordinates."
     )
 
-# --- Action Selection Step ---
+# Action Selection Step
 
 def build_action_selection_system_prompt() -> str:
     """System prompt for the final, tool-constrained action selection step."""

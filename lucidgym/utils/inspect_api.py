@@ -1,18 +1,18 @@
-# agents/templates/as66/inspect_api.py
+"""
+Utility script for inspecting raw ARC-AGI-3 API responses and debugging environment states.
+"""
 from __future__ import annotations
-import argparse, base64, io, json, os, sys
+import argparse
+import base64
+import io
+import json
+import os
+import sys
 from pathlib import Path
 import requests
 from PIL import Image
 
-# Robust import: works as "python -m ..." or "python path/to/inspect_api.py"
-try:
-    from .downsample import downsample_4x4, to_block_matrix_str
-except Exception:
-    repo_root = Path(__file__).resolve().parents[3]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    from agents.templates.as66.downsample import downsample_4x4, to_block_matrix_str
+from .grid_processing import downsample_4x4, matrix16_to_lines
     
 KEY_COLORS = {
     0: "#FFFFFF", 1: "#CCCCCC", 2: "#999999",
@@ -83,7 +83,7 @@ def main()->None:
         f=res.get("frame") or []
         ds16=downsample_4x4(f, take_last_grid=True, round_to_int=True)
         print("\n-- 16x16 (4x4-avg) BEFORE move --")
-        print(to_block_matrix_str(ds16))
+        print(matrix16_to_lines(ds16))
 
         last=f[-1] if f else []
         if last and last[0]:

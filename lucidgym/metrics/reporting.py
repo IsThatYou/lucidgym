@@ -1,15 +1,15 @@
-# evaluation/report.py
-
+"""
+Reporting utilities for generating evaluation summaries and statistics.
+"""
 import json
 import textwrap
 from collections import defaultdict
-from pathlib import Path 
-from typing import Dict, List, Tuple, Any 
+from pathlib import Path
+from typing import Dict, List, Tuple, Any
 from datetime import datetime
-import statistics 
+import statistics
 
-# Import the new metrics structures
-from .metrics import GameMetrics, LevelMetrics, AttemptMetrics
+from .structures import GameMetrics, LevelMetrics, AttemptMetrics
 
 def calculate_stats(results: List[GameMetrics]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     """
@@ -25,7 +25,7 @@ def calculate_stats(results: List[GameMetrics]) -> Tuple[Dict[str, Dict[str, Any
     total_completed_all = 0
     total_duration_all = 0.0
 
-    # --- Pass 1: Collect raw data per game and per level ---
+    #  Pass 1: Collect raw data per game and per level 
     for res in results:
         game_id = res.game_id
         total_runs_all += 1
@@ -58,7 +58,7 @@ def calculate_stats(results: List[GameMetrics]) -> Tuple[Dict[str, Dict[str, Any
             game_level_stats[game_id][level_num]['attempt_durations'].extend([a.duration_seconds for a in level_data.attempts])
 
 
-    # --- Pass 2: Calculate aggregated statistics ---
+    #  Pass 2: Calculate aggregated statistics 
     overall_summary = {
         "total_runs": total_runs_all,
         "total_completed": total_completed_all,
@@ -131,7 +131,7 @@ def calculate_stats(results: List[GameMetrics]) -> Tuple[Dict[str, Dict[str, Any
     return processed_game_stats, overall_summary
 
 
-# --- Console Report Function ---
+#  Console Report Function 
 def generate_console_report(results_data: List[GameMetrics], suite_name: str, agent_name: str, num_runs_per_game: int):
     """Generates and prints a report to the console with level details."""
 
@@ -141,7 +141,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
         
     game_stats, overall_summary = calculate_stats(results_data)
 
-    print("\n--- Evaluation Report (Console) ---")
+    print("\n Evaluation Report (Console) ")
     print(f"Agent: {agent_name}")
     print(f"Suite: {suite_name}")
     print(f"Requested Runs per Game: {num_runs_per_game}")
@@ -178,7 +178,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
             
             print(f"{game_id_short:<25} | {avg_score_str:>16} | {avg_lvl_str:>16} | {avg_actions_str:>18} | {avg_duration_str:>18} | {completion_rate_str:>15} | {runs_str:>18}")
             
-            # --- Print Averaged Level Stats ---
+            #  Print Averaged Level Stats 
             if stats['level_stats']:
                 print("  Level Stats (Averaged Across Runs):")
                 lvl_header = f"    {'Lvl':>3} | {'Avg Total Actions':>18} | {'Avg Success Actions':>20} | {'Avg Total GOs':>14} | {'Avg State ∆':>12} | {'Cmpl Rate':>11} | {'Attempts':>10}"
@@ -196,7 +196,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
 
     # Detailed Per-Run Results (Console)
     print("\n##  Detailed Per-Run Results")
-    # --- UPDATED HEADER ---
+    #  UPDATED HEADER 
     detail_header = f"{'Game ID':<25} | {'Run':>5} | {'Status':<15} | {'Score':>7} | {'H-Lvl':>5} | {'Actions':>7} | {'Duration':>10} | {'GOs':>3} | {'Details (Replay URL / Error)'}"
     print(detail_header)
     print("-" * (len(detail_header) + 4)) # Auto-fit width
@@ -215,7 +215,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
             duration = f"{res.run_duration_seconds:.2f}s"
             game_overs = res.total_game_overs_across_run # Use new aggregated field
             
-            # --- NEW DETAIL LOGIC ---
+            #  NEW DETAIL LOGIC 
             details = res.replay_url or 'N/A'
             if res.status == "ERROR" and res.error_message:
                 # Shorten the error message to fit on one line
@@ -224,10 +224,10 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
             print(f"{game_id_short:<25} | {run_idx:>5} | {status:<15} | {score:>7} | {highest_lvl:>5} | {actions:>7} | {duration:>10} | {game_overs:>3} | {details}") 
 
     print("-" * (len(detail_header) + 4))
-    print("\n--- End of Console Report ---")
+    print("\n End of Console Report ")
 
 
-# --- Summary Text File Function ---
+#  Summary Text File Function 
 def save_summary_report(
     filepath: str, 
     game_stats: Dict[str, Dict[str, Any]], 
@@ -241,7 +241,7 @@ def save_summary_report(
     
     report_lines = []
     
-    report_lines.append("--- Evaluation Summary Report ---")
+    report_lines.append(" Evaluation Summary Report ")
     report_lines.append(f"Agent: {agent_name}")
     report_lines.append(f"Suite: {suite_name}")
     report_lines.append(f"Requested Runs per Game: {num_runs_per_game}")
@@ -316,7 +316,7 @@ def save_summary_report(
             duration = f"{res.run_duration_seconds:.2f}s"
             game_overs = res.total_game_overs_across_run
             
-            # --- NEW DETAIL LOGIC ---
+            #  NEW DETAIL LOGIC 
             details = f"-> {res.replay_url or 'N/A'}"
             if res.status == "ERROR" and res.error_message:
                 # Shorten the error message
@@ -325,7 +325,7 @@ def save_summary_report(
             report_lines.append(f"  Run {run_idx:>2}: {status:<15} Score={score:>4}, HighestLvl={highest_lvl:>2}, Actions={actions:>4}, Dur={duration:>8}, GOs={game_overs:>3} {details}")
             
     report_lines.append("-" * 80)
-    report_lines.append("\n--- End of Summary Report ---")
+    report_lines.append("\n End of Summary Report ")
 
     # Write to file
     try:

@@ -26,13 +26,13 @@ if str(project_root) not in sys.path:
 load_dotenv(dotenv_path=project_root / ".env.example")
 load_dotenv(dotenv_path=project_root / ".env", override=True)
 
-from agents import AVAILABLE_AGENTS
-from agents.agent import Agent
-from agents.structs import FrameData, GameAction, GameState
-from evaluation.config import EVALUATION_GAMES
-# Import the new metrics structures
-from evaluation.metrics import GameMetrics, LevelMetrics, AttemptMetrics
-from evaluation.report import generate_console_report, save_summary_report, calculate_stats
+from lucidgym.agents import AVAILABLE_AGENTS
+from lucidgym.agents.base_agent_wrapper import BaseAgentWrapper
+from lucidgym.environments.arcagi3.structs import FrameData, GameAction, GameState
+from lucidgym.evaluation.config import EVALUATION_GAMES
+from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
+from lucidgym.metrics.reporting import generate_console_report, save_summary_report, calculate_stats
+from rllm.agents.agent import BaseAgent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
@@ -122,10 +122,10 @@ def _run_with_retries(func_to_run: Callable, *args: Any, **kwargs: Any) -> Any:
 
 # --- Function to run a single game attempt ---
 def evaluate_single_game(
-    agent: Agent,
+    agent,  # Can be legacy Agent or BaseAgentWrapper
     game_id: str,
     max_actions_per_game: int,
-    run_index: int 
+    run_index: int
 ) -> GameMetrics:
     """Runs a single game evaluation, tracking per-level and per-attempt metrics."""
     
@@ -137,14 +137,14 @@ def evaluate_single_game(
     )
     run_metrics.status = "IN_PROGRESS"
     
-    # --- Level & Attempt Tracking State ---
+    
     current_level_number = 1
     current_level_metrics = LevelMetrics(level_number=current_level_number)
     current_attempt_number = 1
     current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
     level_start_time = time.time() # This will reset for the first attempt of each level
     attempt_start_time = level_start_time
-    # ------------------------------------
+
 
     max_score = 0
     total_actions_this_run = 0 
@@ -355,43 +355,87 @@ def evaluate_single_game(
 
 # --- Task Wrapper for Parallel Execution ---
 def run_evaluation_task(
-    game_id: str, 
-    run_index: int, 
-    agent_class: Type[Agent], 
-    agent_name_cli: str, 
-    card_id: str, 
-    cookies: RequestsCookieJar, 
+    game_id: str,
+    run_index: int,
+    agent_class,
+    agent_name_cli: str,
+    card_id: str,
+    cookies: RequestsCookieJar,
     max_actions: int,
-   
+
     agent_name_with_variant: str,
     env_vars_to_set: Dict[str, str]
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
-    
+
     log.debug(f"Task starting: Game {game_id}, Run {run_index}")
-    
-    # Set environment variables for this thread/task 
+
+    # Set environment variables for this thread/task
     # This ensures the agent's __init__ method reads the correct settings
     for k, v in env_vars_to_set.items():
         if v is not None:
             os.environ[k] = v
         elif k in os.environ:
             del os.environ[k] # Unset if default was None
-    
-    agent_instance = agent_class(
-        card_id=card_id,
-        game_id=game_id,
-        agent_name=agent_name_with_variant, # Pass the full name with all tags
-        ROOT_URL=ROOT_URL,
-        record=False, 
-        cookies=deepcopy(cookies) 
-    )
+
+    # Check if agent_class is a BaseAgent subclass
+    if issubclass(agent_class, BaseAgent):
+        # Create BaseAgent instance with appropriate kwargs
+        # Default to gpt-4o (latest available model)
+        agent_kwargs = {
+            "name": agent_name_with_variant,
+            "model": os.getenv("AGENT_MODEL_OVERRIDE", "gpt-4o"),
+            "reasoning_effort": os.getenv("AGENT_REASONING_EFFORT", "medium"),
+        }
+
+        # Add agent-specific kwargs
+        if "memory" in agent_name_cli.lower():
+            agent_kwargs["game_id"] = game_id
+            agent_kwargs["downsample"] = os.getenv("DOWNSAMPLE_IMAGES", "true").lower() == "true"
+            agent_kwargs["include_text_diff"] = os.getenv("INCLUDE_TEXT_DIFF", "true").lower() == "true"
+            agent_kwargs["context_length_limit"] = int(os.getenv("CONTEXT_LENGTH_LIMIT", "-1"))
+
+            if "visual" in agent_name_cli.lower():
+                agent_kwargs["image_detail_level"] = os.getenv("IMAGE_DETAIL_LEVEL", "low")
+                agent_kwargs["pixels_per_cell"] = int(os.getenv("IMAGE_PIXELS_PER_CELL", "24"))
+
+        if "guided" in agent_name_cli.lower() and "16" in agent_name_cli:
+            agent_kwargs["input_mode"] = "text_only"
+            agent_kwargs["game_id"] = game_id
+
+        # Create BaseAgent
+        base_agent = agent_class(**agent_kwargs)
+
+        # Create session for API calls
+        session = requests.Session()
+        session.headers.update({"X-API-Key": os.getenv("ARC_API_KEY", ""), "Accept": "application/json"})
+        session.cookies.update(cookies)
+
+        # Wrap in BaseAgentWrapper
+        agent_instance = BaseAgentWrapper(
+            base_agent=base_agent,
+            game_id=game_id,
+            card_id=card_id,
+            root_url=ROOT_URL,
+            session=session
+        )
+    else:
+        # Legacy agent - use old constructor
+        agent_instance = agent_class(
+            card_id=card_id,
+            game_id=game_id,
+            agent_name=agent_name_with_variant,
+            ROOT_URL=ROOT_URL,
+            record=False,
+            cookies=deepcopy(cookies)
+        )
+
     # The GameMetrics object will now also store this full name
-    metrics = evaluate_single_game( 
+    metrics = evaluate_single_game(
         agent=agent_instance,
         game_id=game_id,
         max_actions_per_game=max_actions,
-        run_index=run_index 
+        run_index=run_index
     )
     log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
     return metrics

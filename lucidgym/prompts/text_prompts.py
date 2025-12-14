@@ -1,33 +1,15 @@
-# agents/templates/as66/prompts_text.py
+"""
+Multi-game prompt selector with runtime mode switching for text-based observations.
+Supports both detailed per-game prompts and general self-learning prompts.
+"""
 from __future__ import annotations
 from typing import List, Optional, Dict
 import os
 
-# Optionally use the helper to render the 16x16 neatly. If you prefer the inline join below, you can remove this import.
-from .downsample import matrix16_to_lines
+from lucidgym.utils.grid_processing import matrix16_to_lines
 
-"""
-Multi-game prompt selector with a runtime switch:
-
-- Two "modes":
-    1) DETAILED (per-game): uses your current AS66 prompt (unchanged) and filler stubs for LS20, FT09, VC33, LP85, SP80.
-    2) GENERAL: a self-learning prompt usable for any game; teaches the model to infer rules and also documents ACTION6 (click).
-
-- How to choose the mode:
-    • In code: flip USE_GENERAL_PROMPTS_DEFAULT = True / False (below).
-    • Or at runtime: set env ARCGAME_GENERAL_PROMPTS=1 (overrides the default).
-
-- Backward compatible function signatures:
-    build_observation_system_text(game_id=None, use_general=None)
-    build_observation_user_text(ds16, score, step, game_id=None, use_general=None)
-    build_action_system_text(game_id=None, use_general=None)
-    build_action_user_text(ds16, last_obs, game_id=None, use_general=None)
-"""
-
-# -------------------------
 # Switch: set in code (default), or override via env var
-# -------------------------
-USE_GENERAL_PROMPTS_DEFAULT: bool = False # ← flip to True in code to force GENERAL prompts
+USE_GENERAL_PROMPTS_DEFAULT: bool = False
 
 def _use_general(use_general: Optional[bool]) -> bool:
     if use_general is not None:
@@ -37,11 +19,7 @@ def _use_general(use_general: Optional[bool]) -> bool:
     return env_flag or USE_GENERAL_PROMPTS_DEFAULT
 
 
-# -------------------------
 # DETAILED (per-game) packs
-# -------------------------
-
-# AS66 — your existing, fully fleshed-out observation text (unchanged)
 _AS66_OBS_SYSTEM = (
     "You are playing a game which is represented by a 16×16 matrix of integer codes. "
     "This matrix is the current state after a reset or after your most recent move. "
@@ -74,8 +52,8 @@ _AS66_OBS_SYSTEM = (
     "• For each direction (Up, Down, Left, Right), reason carefully about full wrap-around sliding: what blocking elements will be met, what will be the final resting locations, and how these outcomes change proximity/alignment to the U cavity. "
     "• Consider the enemy’s response (8/9), including whether a move would cause immediate collision or a forced collision on the subsequent step. "
     "• Conclude which direction best progresses toward completing the 2×3 cavity in the 0 region while avoiding risk. "
-    "This is a text-only analysis turn; do not name or call an action tool here."
-    "**THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM, DO NOT REPREAT ACTIONS THAT CHANGED NOTHING!"
+    "This is a text-only analysis turn; do not name or call an action tool here. "
+    "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
 )
 
 _AS66_OBS_USER_TMPL = (
@@ -215,7 +193,7 @@ DETAILED_PACKS: Dict[str, Dict[str, str]] = {
     },
 }
 
-# Map the game_id prefix (before '-') to the pack key above
+# Map the game_id prefix to the pack key above
 GAME_PREFIX_TO_PACK = {
     "as66": "AS66",
     "ls20": "LS20",
@@ -226,9 +204,7 @@ GAME_PREFIX_TO_PACK = {
 }
 
 
-# -------------------------
 # GENERAL (self-learning) pack
-# -------------------------
 
 _GENERAL_OBS_SYSTEM = (
     "GENERAL 16×16 GAME — Learn by observation.\n\n"
@@ -251,10 +227,10 @@ _GENERAL_OBS_SYSTEM = (
     "1) Key observations (salient features, suspected roles of notable integers, potential arena vs. perimeter).\n"
     "2) Hypotheses (concise, testable; include invariants and expected effects of inputs without asserting certainty).\n"
     "3) Change-tracking plan (how you will detect/measure differences after an action: moved cells, count deltas, etc.).\n"
-    "4) One-sentence recommended next action (prose only) chosen to maximally reduce uncertainty about the rules."
-    "    **THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM, DO NOT REPREAT ACTIONS THAT CHANGED NOTHING!"
-    "    I repeat, do not reselect an action from the past if the state is the same. **try something new like clicking, or action 5, or moving in a different direction from before**"
-    "    Please start with stating what changed from last time, explicitly noting if the state is identical, and recalling what moves caused changes and in what way in the past"
+    "4) One-sentence recommended next action (prose only) chosen to maximally reduce uncertainty about the rules. "
+    "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING. "
+    "I repeat, do not reselect an action from the past if the state is the same. Try something new like clicking, or action 5, or moving in a different direction from before. "
+    "Please start with stating what changed from last time, explicitly noting if the state is identical, and recalling what moves caused changes and in what way in the past."
 )
 
 _GENERAL_OBS_USER_TMPL = (
@@ -300,9 +276,7 @@ GENERAL_PACK = {
 }
 
 
-# -------------------------
 # Pack selection helpers
-# -------------------------
 
 def _prefix_of(game_id: Optional[str]) -> str:
     if not game_id:
@@ -316,9 +290,7 @@ def _select_pack(game_id: Optional[str], use_general: Optional[bool]) -> Dict[st
     return DETAILED_PACKS.get(key, DETAILED_PACKS["AS66"])
 
 
-# -------------------------
 # Public builders (backward-compatible)
-# -------------------------
 
 def build_observation_system_text(
     game_id: Optional[str] = None,

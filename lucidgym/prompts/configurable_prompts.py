@@ -1,30 +1,14 @@
-# agents/templates/as66/prompts_configurable.py
+"""
+Configurable prompt builders for agents that can receive board state in multiple formats.
+Supports text-only, image-only, and text+image input modes.
+"""
 from __future__ import annotations
 from typing import List, Optional, Dict
 import os
 
-# Import the utility to convert a matrix to an ASCII string
-from .downsample import matrix16_to_lines
+from lucidgym.utils.grid_processing import matrix16_to_lines
 
-"""
-This file is an adaptation of prompts_text.py.
-
-It provides configurable prompt builders for an agent that can receive
-board state as:
-1.  Text Only: (identical to AS66GuidedAgent)
-2.  Image Only: (prompt text omits the ASCII grid)
-3.  Text and Image: (prompt text includes ASCII grid, and also notes the image)
-
-The system prompts are identical across all modes, as requested.
-The user prompts are modified only to remove/add the ASCII
-grid and clarify the input format.
-"""
-
-# -------------------------
 # SYSTEM PROMPTS (Identical for all modes)
-# -------------------------
-
-# This is the full, detailed system prompt from your 'prompts_text.py'
 _AS66_OBS_SYSTEM = (
     "You are playing a game which is represented by a 16×16 matrix of integer codes. "
     "This matrix is the current state after a reset or after your most recent move. "
@@ -57,11 +41,9 @@ _AS66_OBS_SYSTEM = (
     "• For each direction (Up, Down, Left, Right), reason carefully about full wrap-around sliding: what blocking elements will be met, what will be the final resting locations, and how these outcomes change proximity/alignment to the U cavity. "
     "• Consider the enemy’s response (8/9), including whether a move would cause immediate collision or a forced collision on the subsequent step. "
     "• Conclude which direction best progresses toward completing the 2×3 cavity in the 0 region while avoiding risk. "
-    "This is a text-only analysis turn; do not name or call an action tool here."
-    "**THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM, DO NOT REPREAT ACTIONS THAT CHANGED NOTHING!"
+    "This is a text-only analysis turn; do not name or call an action tool here. "
+    "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
 )
-
-# This is the action-phase system prompt from your 'prompts_text.py'
 _AS66_ACT_SYSTEM = (
     "Select exactly one move by calling a single tool. Do not include prose.\n"
     "Available tools:\n"
@@ -79,9 +61,7 @@ def build_action_system_configurable() -> str:
     """Returns the identical, word-for-word system prompt."""
     return _AS66_ACT_SYSTEM
 
-# -------------------------
 # USER PROMPTS (Configurable)
-# -------------------------
 
 def build_observation_user_configurable(
     ds16: List[List[int]],

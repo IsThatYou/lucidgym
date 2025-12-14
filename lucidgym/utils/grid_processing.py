@@ -77,8 +77,6 @@ def matrix16_to_lines(mat: List[List[int]]) -> str:
     return "\n".join(" ".join(str(v) for v in row) for row in mat)
 
 
-#tiny 16×16 visualization for vision/inspection (never used in text prompts) 
-
 KEY_COLORS = {
     0: "#FFFFFF", 1: "#CCCCCC", 2: "#999999",
     3: "#666666", 4: "#000000", 5: "#202020",

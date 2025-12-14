@@ -1,17 +1,19 @@
+"""
+64x64 full-resolution text-based guided agent.
+Identical to guided_text_16 but operates on full 64x64 grids without downsampling.
+"""
 from __future__ import annotations
-from typing import List
+from typing import Any, List, Dict
 import json
 import logging
-
 from openai import OpenAI
 
-from ..llm_agents import GuidedLLM
-from ...structs import FrameData, GameAction, GameState
+from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+
+from lucidgym.environments.arcagi3.structs import GameAction, GameState
 
 log = logging.getLogger(__name__)
 
-
-# ----------------------- 64×64 TEXT-ONLY PROMPTS (your spec) -----------------------
 
 def _build_observation_system_text_64() -> str:
     return (
@@ -24,12 +26,12 @@ def _build_observation_system_text_64() -> str:
         "• When you choose a direction (Up, Down, Left, Right), each movable integer slides as far as possible in that direction. "
         "  Sliding wraps across the board edges when unobstructed (after passing beyond one edge, it reappears from the opposite edge and continues). "
         "  Sliding stops as soon as an obstacle blocks further motion.\n\n"
-        "If you move in a direction with no obstacles ever, you move back to where you started. For example, if one moves up and the entire wraparound has no obstacles, the game state does not change due to your action and you remain stationary. \n\n"
+        "If you move in a direction with no obstacles ever, you move back to where you started. For example, if one moves up and the entire wraparound has no obstacles, the game state does not change due to your action and you remain stationary.\n\n"
         "Obstacles and board semantics:\n"
         "• 4 are walls. Sliding stops adjacent to a 4 and cannot overlap 4s.\n"
         "• 15 are background cells that constitute the playable area (free to traverse and occupy).\n"
         "• The board is typically delimited by boundaries such as 1 or 14. You can generally localize the playable field by the region filled with 15s.\n"
-        "• 0 are target cells. They form a U shape that can be viewed as a larger 8×12 rectangle with the a center block removed. "
+        "• 0 are target cells. They form a U shape that can be viewed as a larger 8×12 rectangle with a center block removed. "
         "  Your objective is to navigate the movable integer(s) into this space to complete the U by filling its cavity. "
         "  The 0 region also interrupts sliding (you stop upon reaching it when the motion would otherwise continue).\n"
         "• You may observe a perimeter/track behavior using 8 and 9; this indicates the consumption of available moves, the more 9s you see, the less moves you have\n\n"
@@ -40,30 +42,14 @@ def _build_observation_system_text_64() -> str:
         "Multiple movers:\n"
         "• If multiple movable integers exist, they all move together in the same chosen direction. Avoid any collision with the hostile entity while advancing the objective of completing the U.\n\n"
         "Target matching with multiple movers:\n"
-        "• On later levels, there may be multiple target U regions that expect specific movers. The 0 U may include a single block of the intended mover’s code to indicate which mover should fill that particular U.\n\n"
+        "• On later levels, there may be multiple target U regions that expect specific movers. The 0 U may include a single block of the intended mover's code to indicate which mover should fill that particular U.\n\n"
         "What to produce during observation (rationale only):\n"
         "• Identify the locations of the movable integer(s) and all relevant structures (0 region, 4 walls, 15 background, 1/14 boundaries, any 8/9 enemy mass). "
         "• For each direction (Up, Down, Left, Right), reason carefully about full wrap-around sliding: what blocking elements will be met, what will be the final resting locations, and how these outcomes change proximity/alignment to the U cavity. "
-        "• Consider the enemy’s response (8/9), including whether a move would cause immediate collision or a forced collision on the subsequent step. "
+        "• Consider the enemy's response (8/9), including whether a move would cause immediate collision or a forced collision on the subsequent step. "
         "• Conclude which direction best progresses toward completing the 8×12 cavity in the 0 region while avoiding risk. "
-        "This is a text-only analysis turn; do not name or call an action tool here."
-        "**THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM, DO NOT REPREAT ACTIONS THAT CHANGED NOTHING!"
-    )
-
-
-def _build_observation_user_text_64(grid64: List[List[int]], score: int, step: int) -> str:
-    rows = [" ".join(str(v) for v in r) for r in grid64]
-    grid_txt = "\n".join(rows)
-    return (
-        f"Score: {score}\n"
-        f"Step: {step}\n"
-        "Matrix 64x64 (integer codes):\n"
-        f"{grid_txt}\n\n"
-        "Rationale:\n"
-        "  • Identify the movable integer(s) and relevant structures (0/4/15/1/14 and any 8/9 enemy mass).\n"
-        "  • For Up, Down, Left, Right: fully simulate wrap-around sliding, state blockers, and final landing positions.\n"
-        "  • Explain how each landing affects progress toward completing the 8×12 U cavity (0 region) and whether the enemy’s response threatens collision.\n"
-        "  • Conclude which direction is best and why. Do not output an action here."
+        "This is a text-only analysis turn; do not name or call an action tool here. "
+        "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS AND PREVIOUSLY WHAT STATE CHANGE CAME FROM THEM. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
     )
 
 
@@ -78,126 +64,265 @@ def _build_action_system_text_64() -> str:
     )
 
 
-def _build_action_user_text_64(grid64: List[List[int]], last_observation_text: str) -> str:
-    rows = [" ".join(str(v) for v in r) for r in grid64]
-    grid_txt = "\n".join(rows)
-    return (
-        "Choose the best single move as a function call.\n"
-        "Matrix 64x64 (integer codes):\n"
-        f"{grid_txt}\n\n"
-        "Previous observation summary:\n"
-        f"{last_observation_text}\n"
-    )
+def _matrix64_to_lines(mat: List[List[int]]) -> str:
+    """Convert 64x64 matrix to text representation."""
+    if not mat:
+        return "(empty)"
+    return "\n".join(" ".join(str(v) for v in row) for row in mat)
 
 
-# ----------------------------- Agent with CLI prints & clean phases -----------------------------
+def _build_tools() -> list[dict]:
+    """Build the tool/function definitions."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "RESET",
+                "description": "Reset the game to start a new attempt",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ACTION1",
+                "description": "Move Up",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ACTION2",
+                "description": "Move Down",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ACTION3",
+                "description": "Move Left",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "ACTION4",
+                "description": "Move Right",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+    ]
 
-class AS66GuidedAgent64(GuidedLLM):
+
+class AS66GuidedAgent64(BaseAgent):
     """
-    64×64 ablation agent (text-only, codes-only) with:
-      • Fresh messages per phase (no history bleed)
-      • Observation: no tools (cannot act)
-      • Action: tool_choice='required'
-      • CLI prints for observation text, action, tokens, score, step, running totals
+    64×64 full-resolution agent using rllm BaseAgent interface.
+    No downsampling - operates on full game grid.
     """
 
-    MAX_ACTIONS = 80
-    MODEL = "gpt-5"
-    DO_OBSERVATION = True
-    MODEL_REQUIRES_TOOLS = True
-    MESSAGE_LIMIT = 14
-    REASONING_EFFORT = "low"
+    def __init__(
+        self,
+        system_prompt: str | None = None,
+        name: str = "as66_guided_agent_64",
+        model: str = "gpt-4o",
+        reasoning_effort: str = "low",
+    ) -> None:
+        """
+        Initialize the agent.
 
-    _transcript: str = ""
-    _token_total: int = 0
+        Args:
+            system_prompt: Override system prompt (optional)
+            name: Agent name
+            model: OpenAI model to use
+            reasoning_effort: Reasoning effort level
+        """
+        self.name = name
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self._system_prompt_override = system_prompt
 
-    def _append(self, s: str) -> None:
-        self._transcript = (self._transcript + s.rstrip() + "\n")[-8000:]
+        self._client = OpenAI()
+        self._latest_tool_call_id = "call_12345"
+        self.reset()
 
-    def _observation(self, latest_frame: FrameData) -> tuple[str, int]:
-        client = OpenAI()
-        grid = latest_frame.frame[-1] if latest_frame.frame else []
-        sys_msg = _build_observation_system_text_64()
-        user_msg = _build_observation_user_text_64(grid, latest_frame.score, len(self.frames))
+    def reset(self) -> None:
+        """Reset agent state for new episode."""
+        self._chat_history: list[dict] = []
+        self._trajectory = Trajectory(name=self.name)
+        self._last_observation: dict[str, Any] | None = None
+        self._token_total: int = 0
+        self._action_counter: int = 0
 
-        resp = client.chat.completions.create(
-            model=self.MODEL,
-            messages=[{"role": "system", "content": sys_msg},
-                      {"role": "user", "content": user_msg}],
-            reasoning_effort=self.REASONING_EFFORT,
+    @property
+    def chat_completions(self) -> list[dict[str, str]]:
+        """Return message history formatted for chat API."""
+        system_msg = self._system_prompt_override or _build_observation_system_text_64()
+        messages: list[dict] = [{"role": "system", "content": system_msg}]
+        messages.extend(self._chat_history)
+        return messages
+
+    @property
+    def trajectory(self) -> Trajectory:
+        """Return the trajectory tracking object."""
+        return self._trajectory
+
+    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+        """Process environment observation and update state."""
+        self._last_observation = observation
+
+        step = Step(
+            observation=observation,
+            reward=reward,
+            done=done,
+            info=info,
+            chat_completions=self.chat_completions.copy()
         )
+        self._trajectory.steps.append(step)
+
+        if self._chat_history and self._chat_history[-1].get("role") == "assistant":
+            state = observation.get("state", "NOT_PLAYED")
+            score = observation.get("score", 0)
+            tool_content = f"State: {state} | Score: {score}"
+
+            self._chat_history.append({
+                "role": "tool",
+                "tool_call_id": self._latest_tool_call_id,
+                "content": tool_content
+            })
+
+    def update_from_model(self, response: str, **_: Any) -> Action:
+        """Convert model response to Action."""
+        if not self._last_observation:
+            return Action(action={"name": "RESET", "data": {}})
+
+        obs = self._last_observation
+        state = obs.get("state", "NOT_PLAYED")
+
+        if state in ("NOT_PLAYED", "GAME_OVER"):
+            return Action(action={"name": "RESET", "data": {}})
+
+        frame_3d = obs.get("frame", [])
+        if not frame_3d:
+            return Action(action={"name": "ACTION5", "data": {}})
+
+        # Use full 64x64 grid (last layer)
+        grid_64 = frame_3d[-1] if frame_3d else []
+        score = obs.get("score", 0)
+
+        # Step 1: Observation phase
+        obs_text = self._call_observation_model(grid_64, score)
+
+        # Step 2: Action selection phase
+        action_dict = self._call_action_model(grid_64, obs_text)
+
+        # Attach observation text as reasoning for ARC API replay logs
+        action_dict["reasoning"] = obs_text
+
+        if self._trajectory.steps:
+            self._trajectory.steps[-1].model_response = obs_text + " | " + str(action_dict)
+            self._trajectory.steps[-1].action = action_dict
+
+        self._action_counter += 1
+        return Action(action=action_dict)
+
+    def _call_observation_model(self, grid_64: List[List[int]], score: int) -> str:
+        """Call the model for observation/reasoning phase."""
+        sys_msg = _build_observation_system_text_64()
+
+        matrix_text = _matrix64_to_lines(grid_64)
+        user_msg = (
+            f"Score: {score}\n"
+            f"Step: {self._action_counter}\n"
+            f"Matrix 64x64 (integer codes):\n{matrix_text}\n\n"
+            "Rationale:\n"
+            "  • Identify the movable integer(s) and relevant structures.\n"
+            "  • For Up, Down, Left, Right: fully simulate wrap-around sliding, state blockers, and final landing positions.\n"
+            "  • Explain how each landing affects progress toward completing the U cavity and whether the enemy's response threatens collision.\n"
+            "  • Conclude which direction is best and why. Do not output an action here."
+        )
+
+        messages = [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_msg}
+        ]
+
+        # Build API call parameters
+        api_params = {
+            "model": self.model,
+            "messages": messages,
+        }
+
+        # Add reasoning_effort for GPT-5 series models
+        if self.model.startswith("gpt-5"):
+            api_params["reasoning_effort"] = self.reasoning_effort
+
+        resp = self._client.chat.completions.create(**api_params)
+
+        self._token_total += getattr(resp.usage, "total_tokens", 0) or 0
         text = (resp.choices[0].message.content or "").strip()
+
         if resp.choices[0].message.tool_calls:
             text = "(observation only; tool call suppressed)"
-        for bad in ("{\"id\":\"ACTION", "ACTION1", "ACTION2", "ACTION3", "ACTION4"):
-            if bad in text and "Rationale" not in text:
-                text = "(observation only; action-like content suppressed)"
-        used = getattr(resp.usage, "total_tokens", 0) or 0
-        return text, used
 
-    def _action(self, latest_frame: FrameData, last_obs: str) -> tuple[GameAction, int]:
-        client = OpenAI()
-        grid = latest_frame.frame[-1] if latest_frame.frame else []
+        return text
+
+    def _call_action_model(self, grid_64: List[List[int]], last_obs: str) -> dict:
+        """Call the model for action selection phase."""
         sys_msg = _build_action_system_text_64()
-        user_msg = _build_action_user_text_64(grid, last_obs)
 
-        resp = client.chat.completions.create(
-            model=self.MODEL,
-            messages=[{"role": "system", "content": sys_msg},
-                      {"role": "user", "content": user_msg}],
-            tools=self.build_tools(),
-            tool_choice="required",
-            reasoning_effort=self.REASONING_EFFORT,
+        matrix_text = _matrix64_to_lines(grid_64)
+        user_msg = (
+            f"Choose the best single move as a function call.\n"
+            f"Matrix 64x64 (integer codes):\n{matrix_text}\n\n"
+            f"Previous observation summary:\n{last_obs}\n"
         )
-        m = resp.choices[0].message
-        used = getattr(resp.usage, "total_tokens", 0) or 0
 
+        tools = _build_tools()
+
+        messages = [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_msg}
+        ]
+
+        # Build API call parameters
+        api_params = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "required",
+        }
+
+        # Add reasoning_effort for GPT-5 series models
+        if self.model.startswith("gpt-5"):
+            api_params["reasoning_effort"] = self.reasoning_effort
+
+        resp = self._client.chat.completions.create(**api_params)
+
+        self._token_total += getattr(resp.usage, "total_tokens", 0) or 0
+
+        m = resp.choices[0].message
         if not m.tool_calls:
-            act = GameAction.ACTION5
-            act.reasoning = {"error": "model did not call a tool"}
-            return act, used
+            return {"name": "ACTION1", "data": {}}
 
         tc = m.tool_calls[0]
+        self._latest_tool_call_id = tc.id
         name = tc.function.name
+
         try:
             args = json.loads(tc.function.arguments or "{}")
         except Exception:
             args = {}
-        act = GameAction.from_name(name)
-        act.set_data(args)
-        return act, used
 
-    def is_done(self, frames: list[FrameData], latest_frame: FrameData) -> bool:
-        return latest_frame.state is GameState.WIN
+        self._chat_history.append({
+            "role": "assistant",
+            "tool_calls": [{
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": name, "arguments": tc.function.arguments}
+            }]
+        })
 
-    def choose_action(self, frames: list[FrameData], latest_frame: FrameData) -> GameAction:
-        # RESET as needed
-        if latest_frame.state in (GameState.NOT_PLAYED, GameState.GAME_OVER):
-            log.info("▶️  RESET required (state=%s)", latest_frame.state.name)
-            return GameAction.RESET
-
-        step = self.action_counter + 1
-        log.info("──── Turn %d | Score=%d ────", step, latest_frame.score)
-
-        # Observation (no tools)
-        obs_text, obs_tokens = self._observation(latest_frame)
-        self._token_total += obs_tokens
-        self._append("Observation agent message:\n" + obs_text + "\n")
-        log.info("OBS (%d tok, total %d):\n%s", obs_tokens, self._token_total, obs_text)
-
-        # Action (required tool)
-        act, act_tokens = self._action(latest_frame, obs_text)
-        self._token_total += act_tokens
-        self._append(f"Action agent choice: {act.name}\n")
-        log.info("ACT  (%d tok, total %d): %s", act_tokens, self._token_total, act.name)
-
-        # attach transcript
-        act.reasoning = {
-            "agent": "as66guidedagent64",
-            "model": self.MODEL,
-            "reasoning_effort": self.REASONING_EFFORT,
-            "tokens_this_turn": {"observation": obs_tokens, "action": act_tokens},
-            "tokens_total": self._token_total,
-            "transcript_tail": self._transcript[-2000:],
-        }
-        return act
+        return {"name": name, "data": args}

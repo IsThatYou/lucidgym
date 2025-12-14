@@ -1,6 +1,10 @@
+"""
+Prompts for generating synthetic reasoning traces for supervised fine-tuning (SFT).
+"""
 from __future__ import annotations
 from typing import List
-from .prompts_text import build_observation_system_text
+
+from .text_prompts import build_observation_system_text
 
 PRIMER_HEADER = """\
 You are the AS66 game-playing agent. You will conduct a thorough OBSERVATION, then choose

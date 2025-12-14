@@ -1,14 +1,11 @@
-# agents/templates/as66/prompts_visual_memory.py
 """
-Wraps the prompts from prompts_memory.py to create a new multimodal (image-based)
-agent. It prepends a new system prompt header that defines the color mapping
-and the new multimodal context format (images + text diffs).
+Multimodal (image-based) prompt wrappers for hypothesis-based memory agents.
+Wraps the prompts from memory_prompts.py and adds color mapping context for visual inputs.
 """
 from __future__ import annotations
 from typing import List, Optional
 
-# Import the original text-based prompt builders
-from .prompts_memory import (
+from .memory_prompts import (
     build_initial_hypotheses_system_prompt as original_initial_system,
     build_initial_hypotheses_user_prompt as original_initial_user,
     build_update_hypotheses_system_prompt as original_update_system,
@@ -22,7 +19,7 @@ from .prompts_memory import (
 # This is the color mapping from downsample.py, which generates the images
 COLOR_MAPPING_HEADER = """
 You are an expert game analyst. You will be playing a game represented by 16x16 color images and a textual matrix of ints.
-Your goal is to form and test hypotheses about the game's rules. **you are not to make any tool calls**
+Your goal is to form and test hypotheses about the game's rules. You are not to make any tool calls.
 
 **IMAGE AND COLOR MAPPING:**
 All game states are provided as 16x16 images, where each color corresponds to a specific integer.
@@ -59,11 +56,10 @@ where (0, 0) is the **top-left** corner.
 Example: "- Cell (8, 5): 6 -> 15" means the cell at row 8, column 5 changed
 from integer 6 (Blue) to integer 15 (Purple).
 
-Your analysis, hypotheses, and rationales must be based on this multimodal information. **AGAIN RESPOND WITH SIMPLE TEXT AND USE NO TOOLS**
----
+Your analysis, hypotheses, and rationales must be based on this multimodal information. Again, respond with simple text and use no tools.
 """
 
-# --- Wrapped Initial Hypothesis Generation ---
+# Wrapped Initial Hypothesis Generation
 
 def build_initial_hypotheses_system_prompt() -> str:
     """System prompt for generating the first set of hypotheses."""
@@ -85,7 +81,7 @@ def build_initial_hypotheses_user_content(game_id: str, initial_image_b64: str, 
         }
     ]
 
-# --- Wrapped Hypothesis Update ---
+# Wrapped Hypothesis Update
 
 def build_update_hypotheses_system_prompt() -> str:
     """System prompt for the hypothesis update step."""
@@ -119,7 +115,7 @@ def build_update_hypotheses_user_content(memory_content: str, last_move_block: L
     )
     return content
 
-# --- Wrapped Observation Step ---
+# Wrapped Observation Step
 
 def build_observation_system_prompt() -> str:
     """System prompt for the observation step."""
@@ -149,12 +145,12 @@ def build_observation_user_content(memory_content: str, current_image_b64: str, 
             "text": (
                 "\n\n**Full Game Memory (Text History):**\n"
                 f"{memory_content}\n\n"
-                "Follow your reasoning process and provide a detailed text analysis, concluding with your recommended action. Be precise with all coordinates. **you are not to make any tool calls** "
+                "Follow your reasoning process and provide a detailed text analysis, concluding with your recommended action. Be precise with all coordinates. You are not to make any tool calls."
             )
         }
     ]
 
-# --- Wrapped Action Selection Step ---
+# Wrapped Action Selection Step
 
 def build_action_selection_system_prompt() -> str:
     """System prompt for the final, tool-constrained action selection step."""

@@ -1,5 +1,6 @@
-# evaluation/metrics.py
-
+"""
+Data structures for tracking evaluation metrics.
+"""
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import time
@@ -56,32 +57,32 @@ class LevelMetrics:
 @dataclass
 class GameMetrics:
     """Metrics collected for a single game evaluation run."""
-    # --- Identification ---
+    #   Identification  
     game_id: str
     agent_name: str # This will be the "dynamic" name from the CLI
     run_index: int = 1
     guid: Optional[str] = None 
 
-    # --- Overall Run Performance ---
+    #   Overall Run Performance  
     run_total_actions: int = 0 # Sum of total_actions from all LevelMetrics
     final_score: int = 0
     highest_level_reached: int = 1
     status: str = "PENDING" # PENDING, IN_PROGRESS, COMPLETED_RUN, TIMEOUT, ERROR
     error_message: Optional[str] = None # <-- ADDED THIS FIELD
 
-    # --- Detailed Level Data ---
+    #   Detailed Level Data  
     # Stores metrics for each level, including all attempts
     level_metrics: Dict[int, LevelMetrics] = field(default_factory=dict) 
 
-    # --- Timing ---
+    #   Timing  
     start_time: float = field(default_factory=time.time)
     end_time: float = field(default_factory=time.time)
     run_duration_seconds: float = 0.0
 
-    # --- Replay ---
+    #   Replay  
     replay_url: Optional[str] = None 
 
-    # --- Aggregated Totals (for convenience, calculated at the end) ---
+    #   Aggregated Totals (for convenience, calculated at the end)  
     total_state_changes_across_run: int = 0
     total_game_overs_across_run: int = 0
 

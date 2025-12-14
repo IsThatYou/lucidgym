@@ -2,8 +2,30 @@ LucidGym
 ========
 
 LucidGym hosts add-on agents, environments, and workflows that slot into the upstream
-`rllm` stack. The TextArena adapters under `lucidgym/` are used by the example
-training scripts living in `examples/`.
+`rllm` stack. All agents now use `rllm.agents.agent.BaseAgent` with zero legacy dependencies.
+
+## Quick Start: Running Evaluations
+
+### Run AS66 Guided Agent on AS66 Game
+
+```bash
+# Ensure API keys are set in .env file
+# Then run:
+python3.12 -m lucidgym.evaluation.harness \
+    --agent as66_guided_agent \
+    --suite debug_suite \
+    --num_runs 3 \
+    --max_actions 200
+
+# Results saved to evaluation_results/
+```
+
+### Available Agents (All BaseAgent)
+
+- `as66_guided_agent` - 16x16 text-based 
+- `as66_guided_agent_64` - 64x64 full resolution
+- `as66_memory_agent` - Memory + hypothesis tracking
+- `as66_visual_memory_agent` - Multimodal (images + text)
 
 Editable install
 ----------------

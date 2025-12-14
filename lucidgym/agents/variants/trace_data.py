@@ -1,7 +1,7 @@
 """
 AS66 manual script runner → multi-turn SFT conversations for *playing the game*.
 
-Goal (this version):
+Goal:
   • Generate the GLOBAL CARTESIAN PRODUCT of vetted ways across levels.
     If L1 has A ways, L2 has B ways, L3 has C ways, ... → produce A×B×C×... distinct
     episodes. Each episode starts from RESET and executes the chosen way for L1,
@@ -41,12 +41,10 @@ import requests
 
 from openai import OpenAI
 
-from ...agent import Agent
-from ...structs import GameAction, GameState, FrameData
-from .downsample import downsample_4x4, matrix16_to_lines
-from .prompts_sft import build_primer_system_text, build_user_step_text
+from lucidgym.environments.arcagi3.structs import GameAction, GameState, FrameData
+from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
+from lucidgym.prompts.sft_prompts import build_primer_system_text, build_user_step_text
 
-# ----------------------------- Vetted WAYS per level -----------------------------
 # Each level key maps to a LIST OF WAYS; each way is a LIST OF MOVES (strings).
 # Edit these to your vetted sequences. (I folded your l2a..l2e etc. under "l2"/"l3"/"l4".)
 
@@ -84,13 +82,11 @@ WAYS_BY_LEVEL: dict[str, List[List[str]]] = {
 
 LEVEL_ORDER: List[str] = ["l1", "l2", "l3", "l4"]
 
-# ----------------------------- Parallel config -----------------------------
 
 PARALLEL: bool = os.getenv("MANUAL_PARALLEL", "1").strip().lower() in ("1", "true", "yes", "on")
 MAX_WORKERS: int = int(os.getenv("MANUAL_MAX_WORKERS", "25"))
 WRITE_LOCK = threading.Lock()  # serialize file writes
 
-# -------------------------------------- Data models --------------------------------------
 
 @dataclass
 class StepRow:
@@ -127,7 +123,6 @@ class EpisodeResult:
     blocks: List[Block]
     rows: List[StepRow]
 
-# ----------------------------- Tool schemas for ACTION1..4 -----------------------------
 
 TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "ACTION1", "description": "Move Up",    "parameters": {"type":"object","properties":{},"additionalProperties": False}}},
@@ -136,7 +131,6 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {"name": "ACTION4", "description": "Move Right", "parameters": {"type":"object","properties":{},"additionalProperties": False}}},
 ]
 
-# ----------------------------- Isolated env client (one per episode) -----------------------------
 
 class _EnvClient:
     def __init__(self, root_url: str, game_id: str, card_id: str, headers: Dict[str, str], cookies) -> None:
@@ -164,9 +158,8 @@ class _EnvClient:
             payload["guid"] = self.guid
         return self._post(action_name, payload)
 
-# ----------------------------- Manual runner (Cartesian across levels) -----------------------------
 
-class AS66ManualScriptBase(Agent):
+class AS66ManualScriptBase:
     """
     Produces multi-turn SFT conversations where the assistant writes an OBSERVATION
     (multi-paragraph) and calls exactly one ACTIONn tool each turn.
@@ -176,14 +169,27 @@ class AS66ManualScriptBase(Agent):
     """
     USE_IMAGES: bool = False
 
-    def is_done(self, frames: List[FrameData], latest_frame: FrameData) -> bool:
-        # We don't "play" in this Agent; we orchestrate offline episode generation.
-        return True
+    def __init__(self, root_url: str, game_id: str, card_id: str, session: requests.Session):
+        """
+        Initialize the manual script runner.
 
-    def choose_action(self, frames: List[FrameData], latest_frame: FrameData) -> GameAction:
-        return GameAction.ACTION5
+        Args:
+            root_url: ARC API root URL
+            game_id: Game ID for API calls
+            card_id: Scorecard ID for API calls
+            session: requests.Session with auth headers/cookies
+        """
+        self.ROOT_URL = root_url
+        self.game_id = game_id
+        self.card_id = card_id
+        self._session = session
+        self._out_dir: Optional[Path] = None
+        self._rows_path: Optional[Path] = None
 
-    # ------------------------ main entry ------------------------
+    def cleanup(self) -> None:
+        """Cleanup method (currently a no-op)."""
+        pass
+
 
     def main(self) -> None:
         self._prepare_outdir()
@@ -204,7 +210,6 @@ class AS66ManualScriptBase(Agent):
             except Exception: pass
             self.cleanup()
 
-    # ------------------------ build global Cartesian ------------------------
 
     def _iter_global_combos(self) -> List[Tuple[str, List[Tuple[str, int, List[str]]]]]:
         """
@@ -224,7 +229,6 @@ class AS66ManualScriptBase(Agent):
             combos.append((key, spec))
         return combos
 
-    # ------------------------ driver (parallel or sequential) ------------------------
 
     def _run_all_combos(self) -> None:
         combos = self._iter_global_combos()
@@ -247,7 +251,6 @@ class AS66ManualScriptBase(Agent):
                 res = self._run_one_combo(key, spec, headers, cookies)
                 self._write_episode(res)
 
-    # ------------------------ run one episode (one global combo) ------------------------
 
     def _run_one_combo(
         self,
@@ -380,7 +383,6 @@ class AS66ManualScriptBase(Agent):
             rows=all_rows,
         )
 
-    # ------------------------ write one episode safely ------------------------
 
     def _write_episode(self, res: EpisodeResult) -> None:
         with WRITE_LOCK:
@@ -408,7 +410,6 @@ class AS66ManualScriptBase(Agent):
                 for r in res.rows:
                     rf.write(json.dumps(r.__dict__, ensure_ascii=False) + "\n")
 
-    # -------------------- helpers --------------------
 
     @staticmethod
     def _move_to_action_name(m: str) -> str:
@@ -466,7 +467,6 @@ class AS66ManualScriptBase(Agent):
         )
         return (resp.choices[0].message.content or "").strip()
 
-# -------------------------------------- Concrete classes --------------------------------------
 
 class AS66ManualScriptText(AS66ManualScriptBase):
     USE_IMAGES = False

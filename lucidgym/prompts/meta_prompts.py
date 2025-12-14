@@ -203,7 +203,7 @@ Your script **MUST** define the following class:
 import random
 from typing import Any, Dict, List, Optional
 # CRITICAL: You MUST import this function to downsample the grid
-from agents.templates.as66.downsample import downsample_4x4, matrix16_to_lines
+from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
 
 class GeneratedHeuristicAgent:
     
@@ -316,7 +316,7 @@ Your script **MUST** define the following class:
 import random
 from typing import Any, Dict, List, Optional
 # CRITICAL: You MUST import this function to downsample the grid
-from agents.templates.as66.downsample import downsample_4x4, matrix16_to_lines
+from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
 
 class GeneratedHeuristicAgent:
     def __init__(self):

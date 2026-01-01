@@ -180,7 +180,9 @@ class ArcAgi3Client:
         if action is GameAction.RESET:
             data.setdefault("card_id", card)
         normalized_payload = normalize_action_payload(action, data)
+        
         response = self._request_json("POST", f"/api/cmd/{action.name}", normalized_payload)
+        print(f"[DEBUG]:client: guid: {response['guid']}, state: {response.get('state', 'unknown')}")
 
         try:
             return FrameData.model_validate(response)

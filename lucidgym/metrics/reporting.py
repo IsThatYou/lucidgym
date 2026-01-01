@@ -181,7 +181,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
             #  Print Averaged Level Stats 
             if stats['level_stats']:
                 print("  Level Stats (Averaged Across Runs):")
-                lvl_header = f"    {'Lvl':>3} | {'Avg Total Actions':>18} | {'Avg Success Actions':>20} | {'Avg Total GOs':>14} | {'Avg State ∆':>12} | {'Cmpl Rate':>11} | {'Attempts':>10}"
+                lvl_header = f"    {'Lvl':>3} | {'Avg Total Actions':>18} | {'Avg Success Actions':>20} | {'Avg Total GOs':>14} | {'Avg State ∆':>12} | {'Cmpl Rate':>11} | {'Runs':>10}"
                 print(lvl_header)
                 print("    " + "-" * (len(lvl_header) - 4))
                 for lvl_num, lvl_stat in sorted(stats['level_stats'].items()):

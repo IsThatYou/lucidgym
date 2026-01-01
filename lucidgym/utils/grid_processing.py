@@ -19,6 +19,31 @@ from PIL import Image, ImageDraw, ImageFont
 Number = float | int
 
 
+def frame_to_grid_text(frame: Sequence[Sequence[Sequence[int]]]) -> str:
+    """Convert a 2D matrix (array of array of array) into ASCII text."""
+    palette = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+    palette_len = len(palette)
+    max_val = 16
+    lines: list[str] = []
+
+    for row in frame[0]:
+        cells: list[str] = []
+        for pixel in row:
+            idx = int((pixel / max_val) * (palette_len - 1))
+            cells.append(palette[idx])
+        lines.append("".join(cells))
+    return "\n".join(lines)
+
+
+def flatten_frame(frame: Sequence[Sequence[Sequence[int]]]) -> list[int]:
+    """Flatten a 2D RGB frame into a 1D list."""
+    flat: list[int] = []
+    for row in frame:
+        for pixel in row:
+            flat.extend(int(v) for v in pixel)
+    return flat
+
+
 def _mean(vals: Iterable[Number]) -> float:
     vs = list(vals)
     return (sum(vs) / float(len(vs))) if vs else 0.0
@@ -66,63 +91,6 @@ def downsample_4x4(
         return []
     # type: ignore[return-value]
     return downsample_blocks(grid, 4, 4, _mean, round_to_int=round_to_int)
-
-
-def matrix16_to_lines(mat: List[List[int]]) -> str:
-    """
-    Numeric-only textual form (no headers/legends).
-    """
-    if not mat:
-        return "(empty)"
-    return "\n".join(" ".join(str(v) for v in row) for row in mat)
-
-
-KEY_COLORS = {
-    0: "#FFFFFF", 1: "#CCCCCC", 2: "#999999",
-    3: "#666666", 4: "#000000", 5: "#202020",
-    6: "#1E93FF", 7: "#F93C31", 8: "#FF851B",
-    9: "#921231", 10: "#88D8F1", 11: "#FFDC00",
-    12: "#FF7BCC", 13: "#4FCC30", 14: "#2ECC71",
-    15: "#7F3FBF",
-}
-
-def _hex_to_rgb(h: str) -> tuple[int, int, int]:
-    h = h.strip().lstrip("#")
-    if len(h) != 6:
-        return (136, 136, 136)
-    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-def render_grid_to_png_bytes(grid: List[List[int]], cell: int = 22) -> bytes:
-    """
-    Generates a color PNG from a grid (e.g., 16x16 or 64x64).
-    
-    Args:
-        grid: The 2D integer grid.
-        cell: The pixel size (width and height) for each grid cell.
-    """
-    h = len(grid)
-    w = len(grid[0]) if h > 0 else 0
-    if h == 0 or w == 0:
-        # Return a 1x1 black pixel as a fallback
-        im = Image.new("RGB", (1, 1), (0, 0, 0))
-        buf = io.BytesIO()
-        im.save(buf, "PNG", optimize=True)
-        return buf.getvalue()
-
-    H, W = h * cell, w * cell
-    im = Image.new("RGB", (W, H), (0, 0, 0))
-    px = im.load()
-    for y in range(h):
-        row = grid[y]
-        for x in range(w):
-            code = row[x]
-            rgb = _hex_to_rgb(KEY_COLORS.get(int(code) & 15, "#888888"))
-            for dy in range(cell):
-                for dx in range(cell):
-                    px[x * cell + dx, y * cell + dy] = rgb
-    buf = io.BytesIO()
-    im.save(buf, "PNG", optimize=True)
-    return buf.getvalue()
 
 
 def generate_numeric_grid_image_bytes(grid: List[List[int]]) -> bytes:
@@ -186,3 +154,80 @@ def generate_numeric_grid_image_bytes(grid: List[List[int]]) -> bytes:
     buf = io.BytesIO()
     img.save(buf, "PNG", optimize=True)
     return buf.getvalue()
+
+KEY_COLORS = {
+    0: "#FFFFFF", 1: "#CCCCCC", 2: "#999999",
+    3: "#666666", 4: "#000000", 5: "#202020",
+    6: "#1E93FF", 7: "#F93C31", 8: "#FF851B",
+    9: "#921231", 10: "#88D8F1", 11: "#FFDC00",
+    12: "#FF7BCC", 13: "#4FCC30", 14: "#2ECC71",
+    15: "#7F3FBF",
+}
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.strip().lstrip("#")
+    if len(h) != 6:
+        return (136, 136, 136)
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+def render_grid_to_png_bytes(grid: List[List[int]], cell: int = 22) -> bytes:
+    """
+    Generates a color PNG from a grid (e.g., 16x16 or 64x64).
+    
+    Args:
+        grid: The 2D integer grid.
+        cell: The pixel size (width and height) for each grid cell.
+    """
+    h = len(grid)
+    w = len(grid[0]) if h > 0 else 0
+    if h == 0 or w == 0:
+        # Return a 1x1 black pixel as a fallback
+        im = Image.new("RGB", (1, 1), (0, 0, 0))
+        buf = io.BytesIO()
+        im.save(buf, "PNG", optimize=True)
+        return buf.getvalue()
+
+    H, W = h * cell, w * cell
+    im = Image.new("RGB", (W, H), (0, 0, 0))
+    px = im.load()
+    for y in range(h):
+        row = grid[y]
+        for x in range(w):
+            code = row[x]
+            rgb = _hex_to_rgb(KEY_COLORS.get(int(code) & 15, "#888888"))
+            for dy in range(cell):
+                for dx in range(cell):
+                    px[x * cell + dx, y * cell + dy] = rgb
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+# def downsample_grid(grid):
+#     """
+#     Downsamples a 64x64 grid to 16x16 by taking every 4th element 
+#     from every 4th row.
+#     """
+#     # grid[::4] selects every 4th row (indices 0, 4, 8...)
+#     # row[::4] selects every 4th item in that row
+#     return [row[::4] for row in grid[::4]]
+
+
+# import matplotlib.pyplot as plt
+# import numpy as np
+
+# def save_grid_visualization(grid_data, filename='grid_output.png'):
+#     """
+#     Converts a 2D list into a visualized image.
+#     """
+#     # Convert list of lists to a numpy array
+#     matrix = np.array(grid_data)
+    
+#     plt.figure(figsize=(8, 8))
+#     # 'tab20' is great for distinct categories (integers)
+#     # 'nearest' keeps the pixels sharp (no blurring)
+#     plt.imshow(matrix, cmap='tab20', interpolation='nearest')
+    
+#     plt.axis('off')  # Turn off axis numbers
+#     plt.savefig(filename, bbox_inches='tight', pad_inches=0)
+#     plt.close()
+#     print(f"Saved visualization to {filename}")

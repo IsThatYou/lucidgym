@@ -14,15 +14,24 @@ from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
-from lucidgym.prompts.text_prompts import (
-    build_observation_system_text,
-    build_observation_user_text,
-    build_action_system_text,
-    build_action_user_text,
-)
+
 
 log = logging.getLogger(__name__)
 
+
+def build_observation_system_text():
+    return (
+        "You are observing a 16x16 grid representation of a game state. "
+        "Each cell contains an ASCII character representing different game elements. "
+        "Your task is to analyze this grid and determine the best action to take. "
+        "The grid shows the current game state with various symbols representing different game objects."
+    )
+
+def build_action_system_text():
+    return (
+        "You are selecting the best action based on your observation of the game state. "
+        "Choose one of the available actions: ACTION1 (Up), ACTION2 (Down), ACTION3 (Left), ACTION4 (Right), ACTION5 (Enter), ACTION6 (Click)"
+    )
 
 def _coerce_int(v: Any, default: int = 0) -> int:
     try:
@@ -102,19 +111,19 @@ def _build_tools() -> list[dict]:
     ]
 
 
-class AS66GuidedAgent(ArcAgi3Agent):
+class BasicObsActionAgent(ArcAgi3Agent):
     """
-    16×16 downsample agent using rllm BaseAgent interface.
-    Supports observation + single tool call per turn with multimodal input modes.
+    Basic agent that generates an observation, and based on that generates an action.
     """
 
     def __init__(
         self,
         system_prompt: str | None = None,
-        name: str = "as66_guided_agent",
+        name: str = "basic_obs_action_agent",
         input_mode: str = "text_only",
-        model: str = "gpt-4o",
-        reasoning_effort: str = "none",
+        model: str = "gpt-5-nano",
+        reasoning_effort: str = "low",
+        downsample = True,
         game_id: str | None = None,
     ) -> None:
         """
@@ -134,6 +143,7 @@ class AS66GuidedAgent(ArcAgi3Agent):
         self.reasoning_effort = reasoning_effort
         self.game_id = game_id
         self._system_prompt_override = system_prompt
+        self.downsample = downsample
 
         if self.input_mode not in ["text_only", "image_only", "text_and_image"]:
             log.warning(f"Invalid input_mode '{self.input_mode}', defaulting to 'text_only'.")
@@ -155,7 +165,7 @@ class AS66GuidedAgent(ArcAgi3Agent):
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """Return message history formatted for chat API."""
-        system_msg = self._system_prompt_override or build_observation_system_text(self.game_id)
+        system_msg = self._system_prompt_override or build_observation_system_text()
         messages: list[dict] = [{"role": "system", "content": system_msg}]
         messages.extend(self._chat_history)
         return messages
@@ -234,31 +244,34 @@ class AS66GuidedAgent(ArcAgi3Agent):
         # Extract frame and downsample
         frame_3d = obs.get("frame", [])
 
-        ds16 = frame_to_grid_text([downsample_4x4(frame_3d)])
+        if self.downsample:
+            grid = frame_to_grid_text([downsample_4x4(frame_3d)])
+        else:
+            grid = frame_to_grid_text([frame_3d])
         score = obs.get("score", 0)
 
         # DEBUG alternate between ACTION1 and ACTION2
-        action_name = "ACTION1" if self._action_counter % 2 == 0 else "ACTION2"
-        action_dict = {"name": action_name, "data": {}, "obs_text": "", "action_text": ""}
+        # action_name = "ACTION1" if self._action_counter % 2 == 0 else "ACTION2"
+        # action_dict = {"name": action_name, "data": {}, "obs_text": "", "action_text": ""}
             
         # # Step 1: Observation phase
-        # obs_text = await self._call_observation_model(ds16, score, rollout_engine=rollout_engine)
+        obs_text = await self._call_observation_model(grid, score, rollout_engine=rollout_engine)
 
         # # Step 2: Action selection phase
-        # action_dict = await self._call_action_model(ds16, obs_text, rollout_engine=rollout_engine)
-        # action_dict["obs_text"] = obs_text
+        action_dict = await self._call_action_model(grid, obs_text, rollout_engine=rollout_engine)
+        action_dict["obs_text"] = obs_text
 
         # Stash for update_from_model to record
         self._pending_action = action_dict
         return action_dict
 
-    def _build_user_content(self, ds16: List[List[int]], user_prompt_text: str) -> List[Dict[str, Any]]:
+    def _build_user_content(self, grid: List[List[int]], user_prompt_text: str) -> List[Dict[str, Any]]:
         """Build the 'content' array for the API call based on input_mode."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
 
         if self.input_mode in ["image_only", "text_and_image"]:
             try:
-                png_bytes = generate_numeric_grid_image_bytes(ds16)
+                png_bytes = generate_numeric_grid_image_bytes(grid)
                 b64_image = base64.b64encode(png_bytes).decode('utf-8')
                 data_url = f"data:image/png;base64,{b64_image}"
                 content.append({
@@ -276,25 +289,29 @@ class AS66GuidedAgent(ArcAgi3Agent):
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
 
-    async def _call_observation_model(self, ds16: List[List[int]], score: int, rollout_engine=None) -> str:
+    async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
         """Call the model for observation/reasoning phase."""
-        sys_msg = build_observation_system_text(self.game_id, use_general=True)
+        sys_msg = build_observation_system_text()
 
         include_text = self.input_mode in ["text_only", "text_and_image"]
+        grid_text = "16x16" if self.downsample else "64x64"
         format_clarification = ""
         if self.input_mode == "image_only":
-            format_clarification = "The board state is provided as an attached image of the 16x16 grid."
+            format_clarification = f"The board state is provided as an attached image of the {grid_text} grid."
         elif self.input_mode == "text_and_image":
             format_clarification = "The board state is provided as both a textual matrix and an attached image."
 
-        user_msg_text = build_observation_user_text(
-            ds16, score, self._action_counter, self.game_id,
-            format_clarification=format_clarification,
-            include_text_matrix=include_text,
-            use_general=True
+        user_msg_text = (
+            f"Score: {score}\n"
+            f"Step: {self._action_counter}\n"
+            f"Matrix {grid_text} (ASCII characters):\n{grid}\n\n"
+            "Rationale:\n"
+            "  • Identify the movable ASCII character(s) and relevant structures.\n"
+            "  • Conclude which direction is best and why. Do not output an action here.\n"
+            "  • Focus on the strategic importance of each character and how it relates to the goal."
         )
 
-        user_content = self._build_user_content(ds16, user_msg_text)
+        user_content = self._build_user_content(grid, user_msg_text)
 
         messages = [
             {"role": "system", "content": sys_msg},
@@ -305,9 +322,9 @@ class AS66GuidedAgent(ArcAgi3Agent):
         text = (getattr(model_output, "content", None) or getattr(model_output, "text", "") or "").strip()
         return text
 
-    async def _call_action_model(self, ds16: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
+    async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
-        sys_msg = build_action_system_text(self.game_id)
+        sys_msg = build_action_system_text()
 
         include_text = self.input_mode in ["text_only", "text_and_image"]
         format_clarification = ""
@@ -316,13 +333,14 @@ class AS66GuidedAgent(ArcAgi3Agent):
         elif self.input_mode == "text_and_image":
             format_clarification = "The board state is provided as both text and image."
 
-        user_msg_text = build_action_user_text(
-            ds16, last_obs, self.game_id,
-            format_clarification=format_clarification,
-            include_text_matrix=include_text
+        user_msg_text = (
+            "Choose the best single move as a function call.\n"
+            f"{grid}"
+            "Previous observation summary:\n"
+            f"{last_obs}\n"
         )
 
-        user_content = self._build_user_content(ds16, user_msg_text)
+        user_content = self._build_user_content(grid, user_msg_text)
         tools = _build_tools()
 
         messages = [

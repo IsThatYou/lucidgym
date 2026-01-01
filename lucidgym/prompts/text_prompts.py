@@ -6,7 +6,6 @@ from __future__ import annotations
 from typing import List, Optional, Dict
 import os
 
-from lucidgym.utils.grid_processing import matrix16_to_lines
 
 # Switch: set in code (default), or override via env var
 USE_GENERAL_PROMPTS_DEFAULT: bool = False
@@ -309,7 +308,8 @@ def build_observation_user_text(
     include_text_matrix: bool = True,
 ) -> str:
     if include_text_matrix:
-        matrix = matrix16_to_lines(ds16)
+        # matrix = matrix16_to_lines(ds16)
+        matrix = ds16
         matrix_block = (
             "Matrix 16x16 (integer codes):\n"
             f"{matrix}\n"
@@ -341,7 +341,8 @@ def build_action_user_text(
     include_text_matrix: bool = True,
 ) -> str:
     if include_text_matrix:
-        matrix = matrix16_to_lines(ds16)
+        # matrix = matrix16_to_lines(ds16)
+        matrix = ds16
         matrix_block = (
             "Matrix 16x16 (integer codes):\n"
             f"{matrix}\n"

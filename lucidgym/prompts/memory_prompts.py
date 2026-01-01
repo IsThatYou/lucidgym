@@ -5,7 +5,6 @@ Supports initial hypothesis generation, updates, observations, and action select
 from __future__ import annotations
 from typing import List
 
-from lucidgym.utils.grid_processing import matrix16_to_lines
 
 # Initial Hypothesis Generation
 
@@ -32,7 +31,8 @@ def build_initial_hypotheses_system_prompt() -> str:
 
 def build_initial_hypotheses_user_prompt(ds16: List[List[int]]) -> str:
     """User prompt for generating the first set of hypotheses."""
-    grid_txt = matrix16_to_lines(ds16)
+    # grid_txt = matrix16_to_lines(ds16)
+    grid_txt = ds16
     return (
         "Here is the initial state of the game board. Please generate five initial hypotheses about the game's rules, structure, and objectives, each with a concrete test case.\n\n"
         "**Initial Board State (16x16 Matrix):**\n"
@@ -107,7 +107,8 @@ def build_observation_system_prompt() -> str:
 
 def build_observation_user_prompt(memory_content: str, ds16: List[List[int]], score: int, step: int) -> str:
     """User prompt for the observation step."""
-    grid_txt = matrix16_to_lines(ds16)
+    # grid_txt = matrix16_to_lines(ds16)
+    grid_txt = ds16
     return (
         f"**Current Game Status:**\n"
         f"- Step: {step}\n"

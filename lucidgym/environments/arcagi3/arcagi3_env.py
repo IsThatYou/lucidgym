@@ -21,11 +21,10 @@ from .structs import (
     GameAction,
     GameState,
     Scorecard,
-    flatten_frame,
-    frame_to_grid_text,
     normalize_available_actions,
-    downsample_grid,
 )
+
+from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text
 
 
 @dataclass
@@ -99,6 +98,8 @@ class ArcAgi3Env(BaseEnv):
 
     # ------------------------------------------------------------------ #
     def reset(self, task: dict | None = None) -> tuple[dict, dict]:
+        # This will create a new client and open a new scorecard. You should rarely need to use this beside the 
+        # very first initialization. This method is not meant to be called repeatedly during a single episode.
         task = task or {}
         game_id = task.get("game_id", self.config.game_id)
         if "card_id" in task:
@@ -136,13 +137,14 @@ class ArcAgi3Env(BaseEnv):
             cookies=cookies,
             transport=self._transport,
         )
-        self._episode_game_id = game_id
-        self._episode_root_url = root_url
-        self._episode_guid = None
-        self._actions_taken = 0
-        self._episode_frames = []
 
         frame = self._client.reset(tags=self.config.tags)
+        self._episode_game_id = game_id
+        self._episode_root_url = root_url
+        if self._episode_guid is None:
+            self._episode_guid = frame.guid
+        self._actions_taken = 0
+        self._episode_frames = []
         self.config.card_id = self._client.default_card_id
         self._episode_card_id = self._client.default_card_id
         self._handle_new_frame(frame, is_reset=True)
@@ -264,7 +266,7 @@ class ArcAgi3Env(BaseEnv):
         if self.config.include_grid_flat:
             observation["grid_flat"] = flatten_frame(frame.frame)
         if self.config.include_raw_frame:
-            observation["frame"] = downsample_grid(frame.frame)
+            observation["frame"] = frame.frame
         return observation
 
     def _build_info(self, frame: FrameData, *, done: bool) -> dict[str, Any]:

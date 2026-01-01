@@ -19,11 +19,20 @@ from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 from lucidgym.environments.arcagi3.structs import GameAction
 
+def build_initial_usr_prompt(grid):
+    return (
+        "Analyze the following game state grid and determine the best action to take.\n\n"
+        f"{grid}"
+    )
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "You control an ARC-AGI-3 agent. Observe the grid, reason about the task, "
     "then emit a tool call with a 'name' field matching ACTION1-7 plus "
     "optional coordinates (x,y) when the action requires them. Include reasoning summarizing why the action was chosen."
 )
+
+
 
 PassthroughFn = Callable[[dict[str, Any], Trajectory], dict[str, Any]]
 
@@ -68,6 +77,14 @@ class ArcAgi3Agent(BaseAgent):
     def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
         # Update internal state
         self._last_observation = observation
+
+        # Handle first observation (initial state)
+        if len(self._chat_history) == 0:
+            grid_text = self._format_observation(self._last_observation)
+            initial_prompt = build_initial_usr_prompt(grid_text)
+            self._chat_history.append({"role": "user", "content": initial_prompt})
+            return
+
         if len(observation) != 0:
             user_msg = self._format_observation(self._last_observation)
             if user_msg:
@@ -83,6 +100,7 @@ class ArcAgi3Agent(BaseAgent):
 
 
     def update_from_model(self, response: str, **_: Any) -> Action:
+        # print("Model response:", response)
         normalized_response = (response or "").strip()
         sentinel_requested = normalized_response.upper() == "__PASSTHROUGH__"
         use_passthrough = self.mode == "passthrough" or (sentinel_requested and self._passthrough_fn is not None)
@@ -102,6 +120,28 @@ class ArcAgi3Agent(BaseAgent):
         return action_payload
 
     # ------------------------------------------------------------------ #
+    async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
+        """Run the two-phase observation/action LLM calls and return text + action dict."""
+        obs = self._last_observation or {}
+        state = obs.get("state", "NOT_PLAYED")
+
+        # Handle RESET needed states
+        # print(f"[DEBUG]:[guided]: obs={obs}")
+        if state in ("NOT_PLAYED", "GAME_OVER"):
+            action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
+            self._pending_action = action_dict
+            return action_dict
+
+        chat_so_far = self.chat_completions
+        print(f"[DEBUG]:arcagi3_agent: chat_so_far={chat_so_far}")
+        tools = self.build_tools()
+        model_output = await self.rollout(rollout_engine, chat_so_far, tools)
+        print(f"[DEBUG]:arcagi3_agent: model_output={model_output}")
+        
+        return action_dict
+    async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
+        return await rollout_engine.get_model_response(messages, tools=tools)
+    
     def _format_observation(self, observation: dict[str, Any]) -> str:
         if "grid_ascii" in observation:
             frame = observation.get("grid_ascii")
@@ -127,9 +167,6 @@ class ArcAgi3Agent(BaseAgent):
 
             # Frame:
             {frame}
-
-            # Output next action:
-            Reply with a several sentences/ paragraphs of plain-text strategy observation about the frame to inform your next action. The output should be a tool call indicating the action to take.
             """
         ).format(
             state=observation.get("state", "UNKNOWN"),
@@ -139,6 +176,8 @@ class ArcAgi3Agent(BaseAgent):
             score=observation.get("score", 0),
             frame=frame if frame else "N/A",
         )
+        # Output next action:
+        # Reply with a several sentences/ paragraphs of plain-text strategy observation about the frame to inform your next action. The output should be a tool call indicating the action to take.
 
     def _parse_action_response(self, response: str) -> dict[str, Any]:
         payload = self._parse_tool_call(response)

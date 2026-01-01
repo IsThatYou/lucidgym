@@ -1,5 +1,6 @@
 import argparse
-import logging 
+import asyncio
+import logging
 import os
 import sys
 import time
@@ -9,16 +10,16 @@ import dataclasses
 from datetime import datetime, timezone
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Optional, Type, List, Callable
+from typing import Any, Dict, Optional, Type, List, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import openai
-from requests.cookies import RequestsCookieJar
 from dotenv import load_dotenv
+from transformers import AutoTokenizer
 
 # Add project root to sys.path
-project_root = Path(__file__).resolve().parents[1]
+project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
@@ -27,11 +28,12 @@ load_dotenv(dotenv_path=project_root / ".env.example")
 load_dotenv(dotenv_path=project_root / ".env", override=True)
 
 from lucidgym.agents import AVAILABLE_AGENTS
-from lucidgym.agents.base_agent_wrapper import BaseAgentWrapper
-from lucidgym.environments.arcagi3.structs import FrameData, GameAction, GameState
+from lucidgym.environments import ArcAgi3Env
+from lucidgym.environments.arcagi3.structs import GameAction, GameState
 from lucidgym.evaluation.config import EVALUATION_GAMES
 from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
 from lucidgym.metrics.reporting import generate_console_report, save_summary_report, calculate_stats
+from rllm.engine.rollout import OpenAIEngine
 from rllm.agents.agent import BaseAgent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -39,10 +41,45 @@ log = logging.getLogger(__name__)
 
 ROOT_URL = os.environ.get("ROOT_URL", "https://three.arcprize.org")
 
-# --- Agent Variant Helper ---
-def _get_agent_tags(agent_name: str) -> List[str]:
+def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> OpenAIEngine:
     """
-    Checks for known environment variables that create agent "variants"
+    Build a rollout engine mirroring the ARC reference runner defaults.
+    """
+    together_api_key = os.getenv("TOGETHER_API_KEY", "").strip()
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+
+    tokenizer = None
+    api_key = openai_api_key
+    base_url = "https://api.openai.com/v1"
+
+    # Use Together/Qwen tokenizer when the model is not an OpenAI-prefixed model.
+    if not model_name.startswith("gpt-"):
+        api_key = together_api_key
+        base_url = "https://api.together.xyz/v1"
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+
+    if not api_key:
+        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
+
+    sampling_params = {
+        "temperature": 1,
+        "max_completion_tokens": 8192,
+        "reasoning_effort": reasoning_effort,
+    }
+
+    return OpenAIEngine(
+        model=model_name,
+        tokenizer=tokenizer,
+        base_url=base_url,
+        api_key=api_key,
+        max_prompt_length=65536 * 2,
+        sampling_params=sampling_params,
+    )
+
+# --- Agent Variant Helper ---
+def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
+    """
+    Checks for known CLI args that create agent "variants"
     and returns a list of tags.
     """
     tags = []
@@ -50,44 +87,44 @@ def _get_agent_tags(agent_name: str) -> List[str]:
     #
     if agent_name.startswith("as66"):
         # Check for the general prompts env var you mentioned
-        if os.getenv("ARCGAME_GENERAL_PROMPTS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        if args.arcgame_general_prompts.strip().lower() in ("1", "true", "yes", "on"):
             tags.append("general")
     
     
     
     # Model/Reasoning
-    model_override = os.getenv("AGENT_MODEL_OVERRIDE")
+    model_override = args.agent_model_override
     if model_override:
         # Sanitize model name for filename
         sanitized_model = model_override.split('/')[-1].replace('.', '_')
         tags.append(sanitized_model)
         
-    reasoning_effort = os.getenv("AGENT_REASONING_EFFORT")
+    reasoning_effort = args.agent_reasoning_effort
     if reasoning_effort:
         tags.append(f"reason-{reasoning_effort}")
 
     # Text Diff
-    include_text_diff = os.getenv("INCLUDE_TEXT_DIFF", "true").lower() == "true"
+    include_text_diff = args.include_text_diff.lower() == "true"
     if not include_text_diff:
         tags.append("noDiff")
 
     # Context Limit
-    context_limit = int(os.getenv("CONTEXT_LENGTH_LIMIT", "-1"))
+    context_limit = args.context_length_limit
     if context_limit != -1:
         tags.append(f"ctx{context_limit // 1000}k")
 
     # Downsample
-    downsample_images = os.getenv("DOWNSAMPLE_IMAGES", "true").lower() == "true"
+    downsample_images = args.downsample_images.lower() == "true"
     if not downsample_images and "as66visualmemoryagent" in agent_name:
         tags.append("64x64")
 
     # Image Detail
-    image_detail = os.getenv("IMAGE_DETAIL_LEVEL", "low").lower()
+    image_detail = args.image_detail_level.lower()
     if image_detail != "low" and "as66visualmemoryagent" in agent_name:
         tags.append(f"detail-{image_detail}")
 
     # Pixels Per Cell
-    pixels_per_cell = int(os.getenv("IMAGE_PIXELS_PER_CELL", "24"))
+    pixels_per_cell = args.image_pixels_per_cell
     if pixels_per_cell != 24 and "as66visualmemoryagent" in agent_name:
         tags.append(f"cell{pixels_per_cell}")
 
@@ -122,323 +159,268 @@ def _run_with_retries(func_to_run: Callable, *args: Any, **kwargs: Any) -> Any:
 
 # --- Function to run a single game attempt ---
 def evaluate_single_game(
-    agent,  # Can be legacy Agent or BaseAgentWrapper
+    agent,
+    env: ArcAgi3Env,
     game_id: str,
+    agent_name: str,
     max_actions_per_game: int,
-    run_index: int
+    run_index: int,
+    tags: Optional[List[str]] = None,
+    rollout_engine: Optional[OpenAIEngine] = None,
 ) -> GameMetrics:
-    """Runs a single game evaluation, tracking per-level and per-attempt metrics."""
-    
+    """Run a single env-driven game loop without the BaseAgentWrapper."""
+
+
     run_metrics = GameMetrics(
-        game_id=game_id, 
-        agent_name=agent.agent_name, 
-        run_index=run_index, 
-        start_time=time.time() 
+        game_id=game_id,
+        agent_name=agent_name,
+        run_index=run_index,
+        start_time=time.time(),
     )
     run_metrics.status = "IN_PROGRESS"
-    
-    
+
     current_level_number = 1
     current_level_metrics = LevelMetrics(level_number=current_level_number)
     current_attempt_number = 1
     current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
-    level_start_time = time.time() # This will reset for the first attempt of each level
-    attempt_start_time = level_start_time
-
+    attempt_start_time = run_metrics.start_time
 
     max_score = 0
-    total_actions_this_run = 0 
-    loop_exited_normally = False # Flag to track if loop timed out
+    total_actions_this_run = 0
+    arc_state: Optional[GameState] = None
+    arc_score = 0
+
+    agent_tools: List[dict[str, Any]] = []
+    supports_accumulated_reasoning = bool(rollout_engine and getattr(rollout_engine, "tokenizer", None))
+    rollout_loop = asyncio.new_event_loop() if rollout_engine is not None else None
 
     try:
-        # Use retry helper for initial RESET
-        frame = _run_with_retries(agent.take_action, GameAction.RESET)
-        if not frame:
-            # This check remains, as _run_with_retries might return None if the underlying function does
-            raise ConnectionError(f"Failed to RESET game {game_id} (Run {run_index}).")
-        
-        agent.append_frame(frame) 
-        run_metrics.start_time = time.time() # Refined start time
-        level_start_time = run_metrics.start_time # Start level 1 timer
-        attempt_start_time = run_metrics.start_time # Start attempt 1 timer
+        if hasattr(agent, "build_tools"):
+            try:
+                agent_tools = agent.build_tools()  # type: ignore[attr-defined]
+            except Exception as tool_err:
+                log.warning(f"[{game_id} Run {run_index}] Failed to build agent tools: {tool_err}")
+
+        if hasattr(agent, "reset"):
+            agent.reset()
+
+        def _reset_game_state(env, agent, run_metrics, initial_reset=True):
+            observation, info = _run_with_retries(
+                env.reset,
+                task={"game_id": game_id, "max_actions": max_actions_per_game, "tags": tags},
+            )
+
+            arc_info = info.get("arc", {})
+            arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
+            arc_score = arc_info.get("score", 0) or 0
+            run_metrics.guid = arc_info.get("guid")
+            run_metrics.replay_url = arc_info.get("replay_url")
+
+            agent.update_from_env(observation=observation, reward=0.0, done=False, info=info)
+
+            return arc_state, arc_score
+        arc_state, arc_score = _reset_game_state(env, agent, run_metrics)
+
+        def _record_attempt(status: str, current_attempt_metrics, current_level_metric, game_over: bool = False) -> float:
+            attempt_end_time = time.time()
+            current_attempt_metrics.duration_seconds = attempt_end_time - attempt_start_time
+            current_attempt_metrics.status = status
+            if game_over:
+                current_attempt_metrics.game_overs += 1
+            current_level_metrics.attempts.append(current_attempt_metrics)
+            return attempt_end_time
 
         while total_actions_this_run < max_actions_per_game:
-            # Use retry helper for choose_action (LLM call)
-            action = _run_with_retries(agent.choose_action, agent.frames, agent.frames[-1])
-            previous_frame = agent.frames[-1]
-            # Use retry helper for take_action (Game server call)
-            latest_frame = _run_with_retries(agent.take_action, action)
-            
-            # Action completed, update counters BEFORE checking for errors/completion
-            agent.action_counter += 1 
-            total_actions_this_run += 1
-            current_attempt_metrics.actions += 1 # Increment current attempt actions
+            action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
+            action_obj = agent.update_from_model(response=action_dict)
+            print(f"[DEBUG]:harness:action_obj={action_obj}")
+            observation, reward, done, info = _run_with_retries(env.step, action_obj)
+            print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}, _episode_guid:{env._episode_guid}")
 
-            if not latest_frame:
-                log.error(f"[{game_id} Run {run_index}] Agent failed to get a valid frame after action {action.name}. Stopping.")
-                current_attempt_metrics.status = "ERROR"
-                current_level_metrics.status = "ERROR"
-                run_metrics.status = "ERROR"
-                run_metrics.error_message = "Agent failed to get a valid frame." # <-- STORE ERROR
-                break
-            
-            agent.append_frame(latest_frame)
-            max_score = max(max_score, latest_frame.score)
+            total_actions_this_run += 1
+            current_attempt_metrics.actions += 1
+
+            previous_arc_state = arc_state
+            previous_arc_score = arc_score
+            arc_info = info.get("arc", {})
+            new_arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
+            new_arc_score = arc_info.get("score", 0) or 0
+            run_metrics.guid = run_metrics.guid or arc_info.get("guid")
+            run_metrics.replay_url = run_metrics.replay_url or arc_info.get("replay_url")
+
+            if env._episode_frames[-2] != env._episode_frames[-1]:
+                current_attempt_metrics.state_changes += 1
+            arc_state = new_arc_state
+            arc_score = new_arc_score
+            max_score = max(max_score, arc_score)
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
-            # --- Update Attempt Metrics ---
-            if latest_frame.frame != previous_frame.frame:
-                current_attempt_metrics.state_changes += 1
+            agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
 
             # --- Handle Level Completion ---
-            level_completed = (latest_frame.score > previous_frame.score and 
-                               latest_frame.state != GameState.WIN and 
-                               latest_frame.state != GameState.GAME_OVER)
-                                
-            if level_completed:
-                attempt_end_time = time.time()
-                current_attempt_metrics.duration_seconds = attempt_end_time - attempt_start_time
-                current_attempt_metrics.status = "COMPLETED"
-                current_level_metrics.attempts.append(current_attempt_metrics) # Store final attempt
-                
-                current_level_metrics.status = "COMPLETED"
-                run_metrics.level_metrics[current_level_number] = current_level_metrics # Store completed level metrics
-                
-                log.info(f"[{game_id} Run {run_index}] Level {current_level_number} COMPLETED. Successful Attempt: {current_attempt_number} ({current_attempt_metrics.actions} actions). Total Level Actions: {current_level_metrics.total_actions}. Score: {latest_frame.score}.")
+            level_completed = (new_arc_score > previous_arc_score and 
+                               new_arc_state not in (GameState.WIN, GameState.GAME_OVER))
+            # print(f"[DEBUG]:harness: level_completed={level_completed}, new_arc_score={new_arc_score}, arc_score={previous_arc_score}, arc_state={previous_arc_state}, max_score={max_score}")
 
-                # Start next level
+            if level_completed:
+                attempt_end_time = _record_attempt("COMPLETED", current_attempt_metrics, current_level_metrics)
+                current_level_metrics.status = "COMPLETED"
+                run_metrics.level_metrics[current_level_number] = current_level_metrics
+
+                log.info(f"[{game_id} Run {run_index}] Level {current_level_number} COMPLETED. Attempt {current_attempt_number} actions: {current_attempt_metrics.actions}. Score: {new_arc_score}.")
+
                 current_level_number += 1
                 run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
-                
-                # Reset for new level
                 current_level_metrics = LevelMetrics(level_number=current_level_number)
                 current_attempt_number = 1
                 current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
-                level_start_time = attempt_end_time
                 attempt_start_time = attempt_end_time
+                continue
 
-            # --- Handle Game Over ---
-            elif latest_frame.state == GameState.GAME_OVER:
-                attempt_end_time = time.time()
-                current_attempt_metrics.duration_seconds = attempt_end_time - attempt_start_time
-                current_attempt_metrics.status = "GAME_OVER"
-                current_attempt_metrics.game_overs = 1 # This attempt ended in a game over
-                current_level_metrics.attempts.append(current_attempt_metrics) # Store failed attempt
-                
-                log.warning(f"[{game_id} Run {run_index}] Game Over on Level {current_level_number}, Attempt {current_attempt_number}. Actions this attempt: {current_attempt_metrics.actions}. Total Level Actions: {current_level_metrics.total_actions}.")
-                
-                # Issue reset
-                reset_action = GameAction.RESET 
-                # Use retry helper for the RESET action
-                latest_frame = _run_with_retries(agent.take_action, reset_action)
-                if not latest_frame:
-                    log.error(f"[{game_id} Run {run_index}] Failed to RESET after GAME_OVER. Stopping.")
-                    current_level_metrics.status = "ERROR"
-                    run_metrics.status = "ERROR"
-                    run_metrics.error_message = "Failed to RESET after GAME_OVER." # <-- STORE ERROR
-                    break # Stop run on failed reset
-                agent.append_frame(latest_frame)
-                
-                # Start the next attempt for the same level
+            if new_arc_state == GameState.GAME_OVER:
+                _record_attempt("GAME_OVER", current_attempt_metrics, current_level_metrics, game_over=True)
+                current_level_metrics.status = "GAME_OVER"
+                run_metrics.level_metrics[current_level_number] = current_level_metrics
+                run_metrics.status = "TIMEOUT"
+                log.warning(f"[{game_id} Run {run_index}] Game Over on Level {current_level_number}, Attempt {current_attempt_number}. Actions this attempt: {current_attempt_metrics.actions}.")
+                # Agent should call reset to start a new game on its own.
                 current_attempt_number += 1
-                current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number) 
-                attempt_start_time = time.time() 
+                current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
+                attempt_start_time = time.time()
 
-            # --- Handle Win Condition ---
-            elif latest_frame.state == GameState.WIN:
-                attempt_end_time = time.time()
-                current_attempt_metrics.duration_seconds = attempt_end_time - attempt_start_time
-                current_attempt_metrics.status = "COMPLETED"
-                current_level_metrics.attempts.append(current_attempt_metrics) # Store final successful attempt
-                
+            if new_arc_state == GameState.WIN:
+                _record_attempt("COMPLETED", current_attempt_metrics, current_level_metrics)
                 current_level_metrics.status = "COMPLETED"
-                run_metrics.level_metrics[current_level_number] = current_level_metrics 
-                
-                run_metrics.status = "COMPLETED_RUN" # Mark the whole run as complete
-                log.info(f"[{game_id} Run {run_index}] Game COMPLETED successfully! Final Level {current_level_number} actions: {current_attempt_metrics.actions}. Final Score: {latest_frame.score}")
-                break # Exit loop on win
+                run_metrics.level_metrics[current_level_number] = current_level_metrics
+                run_metrics.status = "COMPLETED_RUN"
+                log.info(f"[{game_id} Run {run_index}] Game COMPLETED successfully! Final Level {current_level_number} actions: {current_attempt_metrics.actions}. Final Score: {new_arc_score}")
+                break
 
-            # --- Handle Timeout Condition (Loop Exited Normally) ---
-            else: 
-                loop_exited_normally = True # Set flag
-
-    # --- Handle Errors ---
     except Exception as e:
         run_metrics.status = "ERROR"
-        run_metrics.error_message = str(e) # <-- STORE THE EXCEPTION TEXT
+        run_metrics.error_message = str(e)
         current_attempt_metrics.status = "ERROR"
         current_level_metrics.status = "ERROR"
         log.error(f"[{game_id} Run {run_index}] Exception occurred: {e}", exc_info=True)
-    
-    # --- Finalize Metrics ---
+
     finally:
         run_metrics.end_time = time.time()
         run_metrics.run_duration_seconds = run_metrics.end_time - run_metrics.start_time
-        
-        # --- FIX: Robustly finalize status and last attempt ---
-        
-        # Determine the final status of the last attempt
-        final_attempt_status = "UNKNOWN"
-        if run_metrics.status == "COMPLETED_RUN":
-            final_attempt_status = "COMPLETED" # This was set in the WIN block
-        elif loop_exited_normally:
-            final_attempt_status = "TIMEOUT"
-            log.warning(f"[{game_id} Run {run_index}] Game TIMEOUT after {total_actions_this_run} actions on Level {current_level_number}.")
-        elif run_metrics.status == "ERROR":
-            final_attempt_status = "ERROR"
-        elif run_metrics.status == "IN_PROGRESS": # Should only happen if loop broke unexpectedly
-            log.error(f"[{game_id} Run {run_index}] Run ended with IN_PROGRESS status. Marking as ERROR.")
-            final_attempt_status = "ERROR"
-            run_metrics.status = "ERROR"
-            if not run_metrics.error_message: # <-- STORE ERROR
-                run_metrics.error_message = "Run ended unexpectedly in IN_PROGRESS state."
 
-        # Update the last attempt *if it's still marked IN_PROGRESS*
+        final_attempt_status = current_attempt_metrics.status
+        if final_attempt_status == "IN_PROGRESS":
+            if run_metrics.status == "ERROR":
+                final_attempt_status = "ERROR"
+            elif arc_state == GameState.WIN:
+                final_attempt_status = "COMPLETED"
+                run_metrics.status = "COMPLETED_RUN"
+            elif total_actions_this_run >= max_actions_per_game:
+                final_attempt_status = "TIMEOUT"
+                run_metrics.status = "TIMEOUT"
+            elif arc_state == GameState.GAME_OVER:
+                final_attempt_status = "GAME_OVER"
+                run_metrics.status = "TIMEOUT"
+            else:
+                final_attempt_status = "COMPLETED" if run_metrics.status != "ERROR" else "ERROR"
+                if run_metrics.status == "IN_PROGRESS":
+                    run_metrics.status = final_attempt_status
+
         if current_attempt_metrics.status == "IN_PROGRESS":
             current_attempt_metrics.duration_seconds = run_metrics.end_time - attempt_start_time
-            current_attempt_metrics.status = final_attempt_status
-        
-        # Append the last attempt if it hasn't been appended yet
+        current_attempt_metrics.status = final_attempt_status
+
         if not current_level_metrics.attempts or current_level_metrics.attempts[-1].attempt_number != current_attempt_metrics.attempt_number:
             current_level_metrics.attempts.append(current_attempt_metrics)
-        
-        # Finalize the last level's status
         if current_level_metrics.status == "IN_PROGRESS":
             current_level_metrics.status = final_attempt_status
 
-        # Store the last level's metrics
-        if current_level_number not in run_metrics.level_metrics:
-            run_metrics.level_metrics[current_level_number] = current_level_metrics
-
-        # Set the final run status (if it's still IN_PROGRESS, set it to the final attempt status)
-        if run_metrics.status == "IN_PROGRESS":
-            run_metrics.status = final_attempt_status
-        # --- End of FIX ---
-
-        # Aggregate totals from the new LevelMetrics properties
+        run_metrics.level_metrics[current_level_number] = current_level_metrics
         run_metrics.run_total_actions = sum(lm.total_actions for lm in run_metrics.level_metrics.values())
         run_metrics.total_game_overs_across_run = sum(lm.total_game_overs for lm in run_metrics.level_metrics.values())
         run_metrics.total_state_changes_across_run = sum(lm.total_state_changes for lm in run_metrics.level_metrics.values())
-        
-        # This now correctly reflects the *true* total actions from the loop
-        run_metrics.total_actions_taken = total_actions_this_run 
-        
-        # This check is crucial: if the loop counter (e.g. 20) doesn't match the sum (e.g. 19), log it.
-        # This can happen if an error occurs *during* the final action, where total_actions_this_run is 20
-        # but the final attempt's action count is still 19. We trust the loop counter.
-        if run_metrics.run_total_actions != total_actions_this_run and run_metrics.status != "ERROR":
-            log.warning(f"[{game_id} Run {run_index}] Mismatch! Loop counter `total_actions_this_run` is {total_actions_this_run}, but summed `run_total_actions` is {run_metrics.run_total_actions}. Using loop counter.")
-            # Correct the metric to reflect the max_actions timeout
-            run_metrics.run_total_actions = total_actions_this_run
-        elif run_metrics.status == "ERROR":
-            # If an error happened, the loop counter is the source of truth
-            run_metrics.run_total_actions = total_actions_this_run
-
-
+        run_metrics.total_actions_taken = total_actions_this_run
         run_metrics.final_score = max_score
-        
-        run_metrics.guid = agent.guid 
-        if run_metrics.guid and agent.game_id:
-            run_metrics.replay_url = f"{ROOT_URL}/replay/{agent.game_id}/{run_metrics.guid}" 
-            log.debug(f"[{game_id} Run {run_index}] Captured guid: {run_metrics.guid}, Replay URL: {run_metrics.replay_url}")
-        else:
-            log.warning(f"[{game_id} Run {run_index}] Could not capture GUID for replay link.")
-            run_metrics.replay_url = None
-        
-        
-        # Call cleanup on the agent
-        agent.cleanup() 
-    
+
+        if run_metrics.guid and not run_metrics.replay_url:
+            run_metrics.replay_url = f"{ROOT_URL}/replay/{game_id}/{run_metrics.guid}"
+
+
+        if rollout_loop is not None:
+            rollout_loop.close()
 
     return run_metrics
 
 
 # --- Task Wrapper for Parallel Execution ---
 def run_evaluation_task(
+    args,
     game_id: str,
     run_index: int,
     agent_class,
     agent_name_cli: str,
-    card_id: str,
-    cookies: RequestsCookieJar,
     max_actions: int,
-
     agent_name_with_variant: str,
-    env_vars_to_set: Dict[str, str]
+    eval_tags: Optional[List[str]] = None,
+    rollout_engine: Optional[OpenAIEngine] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
     log.debug(f"Task starting: Game {game_id}, Run {run_index}")
 
-    # Set environment variables for this thread/task
-    # This ensures the agent's __init__ method reads the correct settings
-    for k, v in env_vars_to_set.items():
-        if v is not None:
-            os.environ[k] = v
-        elif k in os.environ:
-            del os.environ[k] # Unset if default was None
+    env = ArcAgi3Env(
+        game_id=game_id,
+        root_url=ROOT_URL,
+        api_key=os.getenv("ARC_API_KEY", ""),
+        max_actions=max_actions,
+        tags=eval_tags,
+        include_grid_ascii=True,
+        include_raw_frame=True,
+    )
 
-    # Check if agent_class is a BaseAgent subclass
-    if issubclass(agent_class, BaseAgent):
-        # Create BaseAgent instance with appropriate kwargs
-        # Default to gpt-4o (latest available model)
-        agent_kwargs = {
-            "name": agent_name_with_variant,
-            "model": os.getenv("AGENT_MODEL_OVERRIDE", "gpt-4o"),
-            "reasoning_effort": os.getenv("AGENT_REASONING_EFFORT", "medium"),
-        }
+    try:
+        # Check if agent_class is a BaseAgent subclass
+        if issubclass(agent_class, BaseAgent):
+            # Create BaseAgent instance with appropriate kwargs
+            agent_kwargs = {
+                "name": agent_name_with_variant,
+            }
 
-        # Add agent-specific kwargs
-        if "memory" in agent_name_cli.lower():
-            agent_kwargs["game_id"] = game_id
-            agent_kwargs["downsample"] = os.getenv("DOWNSAMPLE_IMAGES", "true").lower() == "true"
-            agent_kwargs["include_text_diff"] = os.getenv("INCLUDE_TEXT_DIFF", "true").lower() == "true"
-            agent_kwargs["context_length_limit"] = int(os.getenv("CONTEXT_LENGTH_LIMIT", "-1"))
+            # Add agent-specific kwargs
+            if "memory" in agent_name_cli.lower():
+                agent_kwargs["game_id"] = game_id
+                agent_kwargs["downsample"] = args.downsample_images.lower() == "true"
+                agent_kwargs["include_text_diff"] = args.include_text_diff.lower() == "true"
+                agent_kwargs["context_length_limit"] = args.context_length_limit
 
-            if "visual" in agent_name_cli.lower():
-                agent_kwargs["image_detail_level"] = os.getenv("IMAGE_DETAIL_LEVEL", "low")
-                agent_kwargs["pixels_per_cell"] = int(os.getenv("IMAGE_PIXELS_PER_CELL", "24"))
+                if "visual" in agent_name_cli.lower():
+                    agent_kwargs["image_detail_level"] = args.image_detail_level
+                    agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-        if "guided" in agent_name_cli.lower() and "16" in agent_name_cli:
-            agent_kwargs["input_mode"] = "text_only"
-            agent_kwargs["game_id"] = game_id
+            if "guided" in agent_name_cli.lower() and "16" in agent_name_cli:
+                agent_kwargs["input_mode"] = "text_only"
+                agent_kwargs["game_id"] = game_id
 
-        # Create BaseAgent
-        base_agent = agent_class(**agent_kwargs)
+            agent_instance = agent_class(**agent_kwargs)
+        else:
+            raise ValueError(f"Agent class {agent_class} is not a subclass of BaseAgent.")
 
-        # Create session for API calls
-        session = requests.Session()
-        session.headers.update({"X-API-Key": os.getenv("ARC_API_KEY", ""), "Accept": "application/json"})
-        session.cookies.update(cookies)
-
-        # Wrap in BaseAgentWrapper
-        agent_instance = BaseAgentWrapper(
-            base_agent=base_agent,
-            game_id=game_id,
-            card_id=card_id,
-            root_url=ROOT_URL,
-            session=session
-        )
-    else:
-        # Legacy agent - use old constructor
-        agent_instance = agent_class(
-            card_id=card_id,
+        metrics = evaluate_single_game(
+            agent=agent_instance,
+            env=env,
             game_id=game_id,
             agent_name=agent_name_with_variant,
-            ROOT_URL=ROOT_URL,
-            record=False,
-            cookies=deepcopy(cookies)
+            max_actions_per_game=max_actions,
+            run_index=run_index,
+            tags=eval_tags,
+            rollout_engine=rollout_engine,
         )
-
-    # The GameMetrics object will now also store this full name
-    metrics = evaluate_single_game(
-        agent=agent_instance,
-        game_id=game_id,
-        max_actions_per_game=max_actions,
-        run_index=run_index
-    )
-    log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
-    return metrics
+        log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
+        return metrics
+    finally:
+        try:
+            env.close()
+        except Exception as close_err:
+            log.debug(f"[{game_id} Run {run_index}] Env close failed: {close_err}")
 
 
 # --- Main Function ---
@@ -449,6 +431,14 @@ def main():
     parser.add_argument("--max_actions", type=int, default=200, help="Maximum actions per game run before timeout.")
     parser.add_argument("--num_runs", type=int, default=1, help="Number of times to run each game.") 
     parser.add_argument("--max_workers", type=int, default=5, help="Maximum number of parallel workers.") 
+    parser.add_argument("--agent-model", dest="agent_model_override", default="gpt-5-nano", help="Override the agent's default model (e.g., 'gpt-5-nano').")
+    parser.add_argument("--agent-reasoning-effort", dest="agent_reasoning_effort", default="low", help="Override the agent's default reasoning effort.")
+    parser.add_argument("--include-text-diff", dest="include_text_diff", default="true", help="Value for INCLUDE_TEXT_DIFF.")
+    parser.add_argument("--context-length-limit", dest="context_length_limit", type=int, default=-1, help="Value for CONTEXT_LENGTH_LIMIT.")
+    parser.add_argument("--downsample-images", dest="downsample_images", default="true", help="Value for DOWNSAMPLE_IMAGES.")
+    parser.add_argument("--image-detail-level", dest="image_detail_level", default="low", help="Value for IMAGE_DETAIL_LEVEL.")
+    parser.add_argument("--image-pixels-per-cell", dest="image_pixels_per_cell", type=int, default=24, help="Value for IMAGE_PIXELS_PER_CELL.")
+    parser.add_argument("--arcgame-general-prompts", dest="arcgame_general_prompts", default="0", help="Value for ARCGAME_GENERAL_PROMPTS.")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 
@@ -459,34 +449,26 @@ def main():
     
     log.info(f"Agent: '{agent_name_cli}', Suite: '{args.suite}', Games: {len(game_ids)}, Runs per game: {num_runs}, Max workers: {max_workers}, Max Actions: {args.max_actions}")
 
-    card_id: Optional[str] = None
     api_key = os.getenv("ARC_API_KEY", "") 
     if not api_key:
         log.error("ARC_API_KEY environment variable not found. Please set it in your .env file.")
         sys.exit(1) 
-    headers = {"X-API-Key": api_key, "Accept": "application/json"}
-    cookies: Optional[RequestsCookieJar] = None
     
     # --- Setup Results Files (with new naming convention) ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") 
-    
+
+
     #  Get all tags for filename AND for passing to threads 
-    agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli)
+    agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli, args)
     agent_name_with_variant = "-".join(agent_tags)
-    
-    #  Prepare dict of env vars to pass to tasks 
-    env_vars_to_set = {
-        "AGENT_MODEL_OVERRIDE": os.getenv("AGENT_MODEL_OVERRIDE"),
-        "AGENT_REASONING_EFFORT": os.getenv("AGENT_REASONING_EFFORT"),
-        "INCLUDE_TEXT_DIFF": os.getenv("INCLUDE_TEXT_DIFF", "true"),
-        "CONTEXT_LENGTH_LIMIT": os.getenv("CONTEXT_LENGTH_LIMIT", "-1"),
-        "DOWNSAMPLE_IMAGES": os.getenv("DOWNSAMPLE_IMAGES", "true"),
-        "IMAGE_DETAIL_LEVEL": os.getenv("IMAGE_DETAIL_LEVEL", "low"),
-        "IMAGE_PIXELS_PER_CELL": os.getenv("IMAGE_PIXELS_PER_CELL", "24"),
-        "ARCGAME_GENERAL_PROMPTS": os.getenv("ARCGAME_GENERAL_PROMPTS", "0"),
-    }
+
+    eval_tags = [f"eval-{agent_name_with_variant}", args.suite, f"runs-{num_runs}", f"workers-{max_workers}", f"max_actions-{args.max_actions}"]
+
+    rollout_model = args.agent_model_override
+    rollout_reasoning_effort = args.agent_reasoning_effort
+    rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
     
     # Build comprehensive filename
     base_filename = f"{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}_{timestamp}"
@@ -498,28 +480,9 @@ def main():
     log.info(f"Summary report (TXT): {results_filepath_txt}")
 
     overall_start_time = time.time()
-    results_data: List[Dict[str, Any]] = [] # Store raw dicts for JSONL
+    game_metrics_objects_list: List[GameMetrics] = []
 
     try:
-        # Open Scorecard
-        with requests.Session() as s:
-            s.headers.update(headers)
-            # Use the full agent name with variants as the primary tag
-            tags = [f"eval-{agent_name_with_variant}", args.suite, f"runs-{num_runs}", f"workers-{max_workers}", f"max_actions-{args.max_actions}"]
-            log.info(f"Attempting to open scorecard with URL: {ROOT_URL}/api/scorecard/open")
-            r = s.post(f"{ROOT_URL}/api/scorecard/open", json={"tags": tags}, timeout=30)
-            log.info(f"Scorecard open response status: {r.status_code}") 
-            if r.status_code == 401:
-                log.error(f"Authentication failed (401 Unauthorized). Check if ARC_API_KEY is correct and valid: {api_key[:4]}...{api_key[-4:]}")
-                sys.exit(1) 
-            r.raise_for_status() 
-            response_data = r.json()
-            card_id = response_data.get("card_id")
-            if not card_id:
-                raise ValueError("API did not return a card_id when opening scorecard.")
-            cookies = s.cookies 
-            log.info(f"Scorecard '{card_id}' opened for evaluation run.")
-
         # Create Task List
         tasks_to_run = [
             (game_id, run_idx) 
@@ -528,9 +491,6 @@ def main():
         ]
         total_tasks = len(tasks_to_run)
         log.info(f"Total evaluation tasks to run: {total_tasks}")
-        
-        # This list will hold the GameMetrics objects for final reporting
-        game_metrics_objects_list: List[GameMetrics] = []
 
         # Execute in Parallel
         completed_tasks = 0
@@ -538,15 +498,15 @@ def main():
             future_to_task = {
                 executor.submit(
                     run_evaluation_task,
+                    args,
                     game_id, 
                     run_index, 
                     agent_class, 
                     agent_name_cli, # Pass the base name
-                    card_id, 
-                    cookies, 
                     args.max_actions,
                     agent_name_with_variant, # Pass the full name
-                    env_vars_to_set          # Pass the env var dict
+                    eval_tags,
+                    rollout_engine,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }
@@ -613,32 +573,9 @@ def main():
 
     except KeyboardInterrupt:
         log.warning("Keyboard interrupt. Shutting down. Results saved so far are in JSONL.")
-    except requests.exceptions.HTTPError as http_err:
-        log.error(f"HTTP error during evaluation setup: {http_err}") 
     except Exception as e:
         log.error(f"Unexpected error in main loop: {e}", exc_info=True)
     finally:
-        # Close Scorecard
-        if card_id:
-            log.info(f"Closing scorecard '{card_id}'.")
-            try:
-                with requests.Session() as s_close:
-                    s_close.headers.update(headers) 
-                    if cookies:
-                        s_close.cookies.update(cookies)
-                    close_response = s_close.post(f"{ROOT_URL}/api/scorecard/close", json={"card_id": card_id}, timeout=30)
-                    if close_response.status_code != 200:
-                        log.warning(f"Failed to close scorecard '{card_id}'. Status: {close_response.status_code}, Response: {close_response.text[:200]}")
-                    else:
-                        log.info(f"Scorecard '{card_id}' closed successfully.")
-                        log.info(f"View final scorecard online: {ROOT_URL}/scorecards/{card_id}")
-            except requests.exceptions.RequestException as close_err:
-                log.error(f"Network error closing scorecard '{card_id}': {close_err}")
-            except Exception as generic_close_err:
-                log.error(f"Unexpected error closing scorecard '{card_id}': {generic_close_err}")
-        else:
-            log.warning("No scorecard opened or card_id lost; skipping close.")
-
         # Generate Final Reports
         overall_end_time = time.time()
         total_duration = overall_end_time - overall_start_time

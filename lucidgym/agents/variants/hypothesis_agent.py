@@ -15,7 +15,7 @@ from openai import OpenAI
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
-from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
+from lucidgym.utils.grid_processing import downsample_4x4
 from lucidgym.prompts.memory_prompts import (
     build_initial_hypotheses_system_prompt,
     build_initial_hypotheses_user_prompt,
@@ -249,11 +249,11 @@ class AS66MemoryAgent(BaseAgent):
             f"**Action:** `{action_identifier}`\n\n",
             "**State Before:**\n",
             "```\n",
-            f"{matrix16_to_lines(prev_grid)}\n",
+            f"{prev_grid}\n",
             "```\n\n",
             "**Resulting State:**\n",
             "```\n",
-            f"{matrix16_to_lines(new_grid)}\n",
+            f"{new_grid}\n",
             "```\n"
         ]
 

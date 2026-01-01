@@ -238,7 +238,7 @@ class AS66GuidedAgent64(BaseAgent):
             f"Step: {self._action_counter}\n"
             f"Matrix 64x64 (integer codes):\n{matrix_text}\n\n"
             "Rationale:\n"
-            "  • Identify the movable integer(s) and relevant structures.\n"
+            "  • Identify the movable symbol(s) and relevant structures.\n"
             "  • For Up, Down, Left, Right: fully simulate wrap-around sliding, state blockers, and final landing positions.\n"
             "  • Explain how each landing affects progress toward completing the U cavity and whether the enemy's response threatens collision.\n"
             "  • Conclude which direction is best and why. Do not output an action here."

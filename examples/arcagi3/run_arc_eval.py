@@ -45,21 +45,22 @@ def setup_rollout_engine(model) -> OpenAIEngine:
     openai_api_key = os.getenv("OPENAI_API_KEY")
     tokenizer = None
     sampling_params = {
-                "temperature": 1,
+        "temperature": 1,
     }
     disable_thinking = False
     if model.startswith("gpt-"):
         api_key = openai_api_key
         base_url = "https://api.openai.com/v1"
         model_name = model
-        sampling_params["max_completion_tokens"] = 2048
+        sampling_params["max_completion_tokens"] = 8192
+        sampling_params["reasoning_effort"] = "low"   
     else:
         api_key = together_api_key
         base_url = "https://api.together.xyz/v1"
         model_name = model
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
-        sampling_params["max_tokens"] = 2048
-        disable_thinking = True # using non thinking models.
+        sampling_params["max_tokens"] = 8192
+        # disable_thinking = True # using non thinking models.
 
 
     return OpenAIEngine(
@@ -97,12 +98,13 @@ async def main() -> None:
         game_id=args.game_id,
         root_url=args.root_url,
         transport=transport,
-        include_grid_ascii=True,
-        include_raw_frame=True,
         max_actions=10,
         tags=tags,
     )
-    agent = ArcAgi3Agent(mode="passthrough" if passthrough_fn else "llm", passthrough_fn=passthrough_fn)
+    agent = ArcAgi3Agent(
+        downsample=True,
+        grid=True,
+    )
     rollout_engine = setup_rollout_engine(args.model)
 
     observation, info = env.reset()
@@ -117,20 +119,24 @@ async def main() -> None:
     # print(f"Initial frame:\n{observation.get('frame', 'N/A')}")
     print(f"Info: {info}")
     tools = agent.build_tools()
+    agent.update_from_env(observation, reward, done, info)
     try:
-        while not done:
-            agent.update_from_env(observation, reward, done, info)
-            # prompt = rollout_engine.chat_parser.parse(agent.chat_completions, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
+        while not done:            # prompt = rollout_engine.chat_parser.parse(agent.chat_completions, add_generation_prompt=True, is_first_msg=True, accumulate_reasoning=True)
             output = await rollout_engine.get_model_response(agent.chat_completions, accumulate_reasoning=False, tools=tools)
-            # print(f"Model output: {output}")
-            wrapped_action = agent.update_from_model(output.text)
+            print(f"Model output: {output}")
+            wrapped_action = agent.update_from_model(output)
+            # print(f"Action: {wrapped_action}")
             observation, reward, done, info = env.step(wrapped_action)
             total_reward += reward
+
+            agent.update_from_env(observation, reward, done, info)
     except Exception as e:
         import traceback
         traceback.print_exc()
     finally:
         env.close()
+
+    print(agent.chat_completions)
     arc_info = info.get("arc", {}) if info else {}
     scorecard_summary = getattr(env, "_scorecard_cache", {})
     print(

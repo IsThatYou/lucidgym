@@ -14,10 +14,15 @@ import json
 import re
 from typing import Any, Callable
 import textwrap
+from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from rllm.engine.rollout.rollout_engine import ModelOutput
 
 from lucidgym.environments.arcagi3.structs import GameAction
+from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text
+
+
 
 def build_initial_usr_prompt(grid):
     return (
@@ -27,9 +32,10 @@ def build_initial_usr_prompt(grid):
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You control an ARC-AGI-3 agent. Observe the grid, reason about the task, "
-    "then emit a tool call with a 'name' field matching ACTION1-7 plus "
-    "optional coordinates (x,y) when the action requires them. Include reasoning summarizing why the action was chosen."
+    "You are an expert ARC-AGI-3 agent that plays a grid-based reasoning game. Observe the grid, reason about the task, "
+    "then emit a tool call with a 'name' field matching ACTION1-6 plus "
+    "optional coordinates (x,y) when the action requires them. Include reasoning summarizing why the action was chosen.\n\n"
+    "Each time you act, the game state updates automatically and you will receive a new observation. "
 )
 
 
@@ -47,18 +53,21 @@ class ArcAgi3Agent(BaseAgent):
         system_prompt: str | None = None,
         name: str = "arcagi3_agent",
         mode: str = "llm",
-        passthrough_fn: PassthroughFn | None = None,
+        downsample: bool = True,
+        grid = True,
     ) -> None:
         if mode not in {"llm", "passthrough"}:
             raise ValueError("mode must be either 'llm' or 'passthrough'.")
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.name = name
         self.mode = mode
-        self._passthrough_fn = passthrough_fn
         self._latest_tool_call_id = "call_12345"
+        self.downsample = downsample
+        self.grid = grid
         self.reset()
 
     def reset(self) -> None:
+        self._steps_this_episode = 0
         self._chat_history: list[dict[str, str]] = []
         self._trajectory = Trajectory(name=self.name)
         self._last_observation: dict[str, Any] | None = None
@@ -85,7 +94,13 @@ class ArcAgi3Agent(BaseAgent):
             self._chat_history.append({"role": "user", "content": initial_prompt})
             return
 
-        if len(observation) != 0:
+
+        if "tool_calls" not in self._chat_history[-1]:
+            # no tool calls in the last message, ask llm to do it again.
+            self._chat_history.append({"role": "user", "content": "No tool calls found in the response. Please make sure to call a valid tool."})
+            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
+            self._trajectory.steps.append(step)
+        elif "error" not in info.get("arc", {}):
             user_msg = self._format_observation(self._last_observation)
             if user_msg:
                 self._chat_history.append({"role": "tool", "tool_call_id": self._latest_tool_call_id, "content": user_msg})
@@ -99,57 +114,84 @@ class ArcAgi3Agent(BaseAgent):
             self._trajectory.steps.append(step)
 
 
-    def update_from_model(self, response: str, **_: Any) -> Action:
-        # print("Model response:", response)
-        normalized_response = (response or "").strip()
-        sentinel_requested = normalized_response.upper() == "__PASSTHROUGH__"
-        use_passthrough = self.mode == "passthrough" or (sentinel_requested and self._passthrough_fn is not None)
-        if use_passthrough:
-            payload = self._call_passthrough()
-            assistant_msg = f"[passthrough] {payload}"
+    def update_from_model(self, response: dict | ModelOutput) -> dict:
+        # Handle RESET needed states
+        state = self._last_observation.get("state", "NOT_PLAYED")
+        if state in ("NOT_PLAYED", "GAME_OVER"):
+            response = ModelOutput(text="Game Over, starting new game.", content="", reasoning="", tool_calls=["RESET"])
+        action_payload = {}
+        args = {}
+        text = response.text
+        content = response.content
+        reasoning = getattr(response, 'reasoning', None)
+        tool_calls = getattr(response, 'tool_calls', [])
+
+        if len(tool_calls) == 0:
+            name = "ACTION5"
         else:
-            action_payload = self._parse_action_response(response)
-            assistant_msg = response
+            if isinstance(tool_calls[0], str):
+                name = "RESET"
+                tool_calls = [ChatCompletionMessageFunctionToolCall(id="", function={"name": "RESET", "arguments": "{}"}, type="function")]
+            else:
+                tc = response.tool_calls[0]
+                self._latest_tool_call_id = tc.id
+                name = tc.function.name
+                arguments = tc.function.arguments
+                args = json.loads(arguments or "{}")
+                
+                if name == "ACTION6":
+                    x_pos = int(args.get("x", 0)) * 4 if self.downsample else int(args.get("x", 0))
+                    y_pos = int(args.get("y", 0)) * 4 if self.downsample else int(args.get("y", 0))
+                    action_payload["x"] = x_pos
+                    action_payload["y"] = y_pos
+        action = GameAction.from_name(name)
+        action_payload["action"] = action
+        action_payload["reasoning"] = f"{text}\n{name} {args}"
+        self._steps_this_episode +=1
             
-        # action = Action(action=action_payload)
         if self._trajectory.steps:
             self._trajectory.steps[-1].model_response = response
             self._trajectory.steps[-1].action = action_payload
 
-        self._chat_history.append({"role": "assistant", "content": assistant_msg})
+
+        if tool_calls and len(tool_calls) > 0:
+            tool_call_dicts = [x.to_dict() for x in tool_calls]
+            message = {"role": "assistant", "content": text, "tool_calls": tool_call_dicts}
+        else:
+            message = {"role": "assistant", "content": text}
+
+        print(f"[DEBUG]:arcagi3_agent:message={message}\nresponse={response}")
+        self._chat_history.append(message)
         return action_payload
 
     # ------------------------------------------------------------------ #
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
-        obs = self._last_observation or {}
-        state = obs.get("state", "NOT_PLAYED")
+        state = self._last_observation.get("state", "NOT_PLAYED")
 
         # Handle RESET needed states
         # print(f"[DEBUG]:[guided]: obs={obs}")
         if state in ("NOT_PLAYED", "GAME_OVER"):
-            action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
-            self._pending_action = action_dict
-            return action_dict
+            model_output = ModelOutput(text="Game Over, starting new game.", content="", reasoning="", tool_calls=["RESET"])
+            return model_output
 
         chat_so_far = self.chat_completions
-        print(f"[DEBUG]:arcagi3_agent: chat_so_far={chat_so_far}")
         tools = self.build_tools()
         model_output = await self.rollout(rollout_engine, chat_so_far, tools)
-        print(f"[DEBUG]:arcagi3_agent: model_output={model_output}")
+        # print(f"[DEBUG]:arcagi3_agent: model_output={model_output}")
         
-        return action_dict
+        return model_output
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
     
     def _format_observation(self, observation: dict[str, Any]) -> str:
-        if "grid_ascii" in observation:
-            frame = observation.get("grid_ascii")
-        elif "grid_flat" in observation:
-            frame = observation.get("grid_flat")
-        elif "frame" in observation:
-            frame = observation.get("frame")
-            # frame = "\n".join(",".join(str(x) for x in row) for row in frame[0])
+        frame = observation["frame"]
+        if self.downsample:
+            frame = [downsample_4x4(observation["frame"])]
+            
+        if self.grid:
+            frame = frame_to_grid_text(frame)
+        else:
             frame = self.pretty_print_3d(frame)
         available_actions = observation.get("available_actions") or []
         if available_actions:
@@ -170,7 +212,7 @@ class ArcAgi3Agent(BaseAgent):
             """
         ).format(
             state=observation.get("state", "UNKNOWN"),
-            step=observation.get("step", 0),
+            step=self._steps_this_episode,
             # card=observation.get("card_id", "?"),
             # game=observation.get("game_id", "?"),
             score=observation.get("score", 0),
@@ -179,42 +221,7 @@ class ArcAgi3Agent(BaseAgent):
         # Output next action:
         # Reply with a several sentences/ paragraphs of plain-text strategy observation about the frame to inform your next action. The output should be a tool call indicating the action to take.
 
-    def _parse_action_response(self, response: str) -> dict[str, Any]:
-        payload = self._parse_tool_call(response)
-        if not payload:
-            return {'action': None, "reasoning": response}
-        action_name = str(payload.get("name", "")).strip().upper()
-        action = GameAction.from_name(action_name)
-        normalized: dict[str, Any] = {"action": action, "action_name": action.name,}
 
-        if action.requires_coordinates():
-            try:
-                normalized["x"] = int(payload["arguments"]["x"])
-                normalized["y"] = int(payload["arguments"]["y"])
-            except (TypeError, ValueError):
-                raise ValueError(f"{action.name} requires integer x/y fields.") from None
-
-        normalized["reasoning"] = response
-
-        return normalized
-
-    def _parse_tool_call(self,response: str) -> Optional[dict[str, Any]]:
-        pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
-        match = re.search(pattern, response, re.DOTALL)
-        if not match:
-            return None  # No tool call found
-        json_str = match.group(1)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"Error parsing JSON: {e}")
-            return None
-
-    def _call_passthrough(self) -> dict[str, Any]:
-        if not self._passthrough_fn:
-            raise ValueError("passthrough_fn must be provided when mode='passthrough'.")
-        observation = self._last_observation or {}
-        return self._passthrough_fn(observation, self._trajectory)
 
     def build_functions(self) -> list[dict[str, Any]]:
         """Build JSON function description of game actions for LLM."""
@@ -300,6 +307,6 @@ class ArcAgi3Agent(BaseAgent):
         for i, block in enumerate(array_3d):
             lines.append(f"Grid {i}:")
             for row in block:
-                lines.append(f"  {row}")
+                lines.append(" ".join(str(x) for x in row))
             lines.append("")
         return "\n".join(lines)

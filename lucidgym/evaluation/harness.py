@@ -248,7 +248,7 @@ def evaluate_single_game(
             run_metrics.guid = run_metrics.guid or arc_info.get("guid")
             run_metrics.replay_url = run_metrics.replay_url or arc_info.get("replay_url")
 
-            if env._episode_frames[-2] != env._episode_frames[-1]:
+            if len(env._episode_frames) >= 2 and env._episode_frames[-2] != env._episode_frames[-1]:
                 current_attempt_metrics.state_changes += 1
             arc_state = new_arc_state
             arc_score = new_arc_score
@@ -373,8 +373,6 @@ def run_evaluation_task(
         api_key=os.getenv("ARC_API_KEY", ""),
         max_actions=max_actions,
         tags=eval_tags,
-        include_grid_ascii=True,
-        include_raw_frame=True,
     )
 
     try:

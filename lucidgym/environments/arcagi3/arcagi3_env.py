@@ -37,9 +37,6 @@ class ArcAgi3EnvConfig:
     max_actions: int = 80
     reward_mode: str = "delta_score"  # delta_score | score | binary
     reward_scale: float = 1.0
-    include_grid_ascii: bool = True
-    include_grid_flat: bool = False
-    include_raw_frame: bool = False
     timeout: float = 30.0
     tags: tuple[str, ...] = ()
 
@@ -59,9 +56,6 @@ class ArcAgi3Env(BaseEnv):
         max_actions: int = 80,
         reward_mode: str = "binary",
         reward_scale: float = 1.0,
-        include_grid_ascii: bool = True,
-        include_grid_flat: bool = False,
-        include_raw_frame: bool = False,
         timeout: float = 30.0,
         transport: TransportFn | None = None,
         tags: Sequence[str] | None = None,
@@ -78,9 +72,6 @@ class ArcAgi3Env(BaseEnv):
             max_actions=max_actions,
             reward_mode=reward_mode,
             reward_scale=reward_scale,
-            include_grid_ascii=include_grid_ascii,
-            include_grid_flat=include_grid_flat,
-            include_raw_frame=include_raw_frame,
             timeout=timeout,
             tags=tuple(tags or ()),
         )
@@ -175,7 +166,10 @@ class ArcAgi3Env(BaseEnv):
             )
         except (ArcAgi3ClientError, ArcAgi3TransportError) as exc:
             info = {"arc": {"error": str(exc)}}
-            return {}, 0.0, True, info
+            return {"state": self._last_frame.state.value}, 0.0, False, info
+        except Exception as exc:
+            info = {"arc": {"error": str(exc)}}
+            return {"state": self._last_frame.state.value}, 0.0, False, info
 
         self._actions_taken += 1
         self._handle_new_frame(frame)
@@ -260,13 +254,8 @@ class ArcAgi3Env(BaseEnv):
                 "height": frame.height,
             },
         }
-        if self.config.include_grid_ascii:
-            observation["grid_ascii"] = frame_to_grid_text(frame.frame)
-            # print(f"grid_ascii\n{observation['grid_ascii']}")
-        if self.config.include_grid_flat:
-            observation["grid_flat"] = flatten_frame(frame.frame)
-        if self.config.include_raw_frame:
-            observation["frame"] = frame.frame
+
+        observation["frame"] = frame.frame
         return observation
 
     def _build_info(self, frame: FrameData, *, done: bool) -> dict[str, Any]:

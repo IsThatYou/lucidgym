@@ -155,6 +155,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
     def reset(self) -> None:
         """Reset agent state for new episode."""
+        super().reset()  # Initialize parent class attributes including _steps_this_episode
         self._chat_history: list[dict] = []
         self._trajectory = Trajectory(name=self.name)
         self._last_observation: dict[str, Any] | None = None

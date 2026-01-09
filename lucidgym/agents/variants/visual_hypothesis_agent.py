@@ -67,6 +67,8 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
         context_length_limit: int = -1,
         image_detail_level: str = "low",
         pixels_per_cell: int = 24,
+        representation: "RepresentationConfig | None" = None,
+        use_general: bool = False,
     ) -> None:
         """
         Initialize the visual memory agent.
@@ -81,7 +83,10 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
             context_length_limit: Max context tokens (-1 for unlimited)
             image_detail_level: OpenAI image detail level (low/high)
             pixels_per_cell: Pixels per grid cell for rendering
+            representation: Grid representation configuration
+            use_general: If True, use general learning prompts
         """
+        from lucidgym.utils.representation import RepresentationConfig
         super().__init__(
             name=name,
             model=model,
@@ -90,6 +95,8 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
             downsample=downsample,
             include_text_diff=include_text_diff,
             context_length_limit=context_length_limit,
+            representation=representation or RepresentationConfig(downsample=downsample),
+            use_general=use_general,
         )
 
         # Vision-specific settings
@@ -452,10 +459,10 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
         log.info(f"[{self.game_id} | Step {step}] Visual Observation Rationale generated.")
         return observation
 
-    def update_from_model(self, response: str, **_: Any) -> Action:
+    def update_from_model(self, action_payload: dict | None = None, **_: Any) -> dict:
         """
         Convert model response to Action.
         Main logic loop that calls the overridden multimodal methods.
         """
         # Reuse parent logic which now calls our overridden multimodal methods
-        return super().update_from_model(response, **_)
+        return super().update_from_model(action_payload, **_)

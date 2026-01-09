@@ -20,7 +20,8 @@ from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from rllm.engine.rollout.rollout_engine import ModelOutput
 
 from lucidgym.environments.arcagi3.structs import GameAction
-from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text
+from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text, format_grid
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
 
 
@@ -54,7 +55,8 @@ class ArcAgi3Agent(BaseAgent):
         name: str = "arcagi3_agent",
         mode: str = "llm",
         downsample: bool = True,
-        grid = True,
+        grid: bool = True,
+        representation: RepresentationConfig | None = None,
     ) -> None:
         if mode not in {"llm", "passthrough"}:
             raise ValueError("mode must be either 'llm' or 'passthrough'.")
@@ -64,6 +66,10 @@ class ArcAgi3Agent(BaseAgent):
         self._latest_tool_call_id = "call_12345"
         self.downsample = downsample
         self.grid = grid
+        # Representation config for grid formatting
+        self.representation = representation or RepresentationConfig(
+            downsample=downsample,
+        )
         self.reset()
 
     def reset(self) -> None:
@@ -186,13 +192,27 @@ class ArcAgi3Agent(BaseAgent):
     
     def _format_observation(self, observation: dict[str, Any]) -> str:
         frame = observation["frame"]
-        if self.downsample:
+
+        # Use representation config if available
+        if self.representation:
+            if self.representation.downsample:
+                grid_2d = downsample_4x4(observation["frame"])
+            else:
+                # Get raw 2D grid from 3D frame
+                grid_2d = frame[-1] if frame else []
+            frame_text = format_grid(grid_2d, self.representation)
+        elif self.downsample:
             frame = [downsample_4x4(observation["frame"])]
-            
-        if self.grid:
-            frame = frame_to_grid_text(frame)
+            if self.grid:
+                frame_text = frame_to_grid_text(frame)
+            else:
+                frame_text = self.pretty_print_3d(frame)
         else:
-            frame = self.pretty_print_3d(frame)
+            if self.grid:
+                frame_text = frame_to_grid_text(frame)
+            else:
+                frame_text = self.pretty_print_3d(frame)
+
         available_actions = observation.get("available_actions") or []
         if available_actions:
             formatted = ", ".join(
@@ -213,10 +233,8 @@ class ArcAgi3Agent(BaseAgent):
         ).format(
             state=observation.get("state", "UNKNOWN"),
             step=self._steps_this_episode,
-            # card=observation.get("card_id", "?"),
-            # game=observation.get("game_id", "?"),
             score=observation.get("score", 0),
-            frame=frame if frame else "N/A",
+            frame=frame_text if frame_text else "N/A",
         )
         # Output next action:
         # Reply with a several sentences/ paragraphs of plain-text strategy observation about the frame to inform your next action. The output should be a tool call indicating the action to take.

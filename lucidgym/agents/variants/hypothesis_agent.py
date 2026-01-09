@@ -173,6 +173,16 @@ class AS66MemoryAgent(ArcAgi3Agent):
         """Generate hash for state deduplication."""
         return hashlib.md5(json.dumps(grid, sort_keys=True).encode()).hexdigest()
 
+    def _format_cell_value(self, val: int) -> str:
+        """Format a single cell value according to the representation config."""
+        from lucidgym.utils.representation import GridFormat
+        if self.representation.format == GridFormat.HEX:
+            return format(val, 'x')
+        elif self.representation.format == GridFormat.SYMBOLIC:
+            return self.representation.symbolic_map.get(val, str(val))
+        else:
+            return str(val)
+
     def _calculate_diff(self, grid1: List[List[int]], grid2: List[List[int]]) -> str:
         """Calculate textual diff between two grids."""
         diffs = []
@@ -184,7 +194,9 @@ class AS66MemoryAgent(ArcAgi3Agent):
         for r in range(h):
             for c in range(w):
                 if grid1[r][c] != grid2[r][c]:
-                    diffs.append(f"- Cell ({r}, {c}): {grid1[r][c]} -> {grid2[r][c]}")
+                    val1 = self._format_cell_value(grid1[r][c])
+                    val2 = self._format_cell_value(grid2[r][c])
+                    diffs.append(f"- Cell ({r}, {c}): {val1} -> {val2}")
 
         if not diffs:
             return "No change in board state."
@@ -255,17 +267,21 @@ class AS66MemoryAgent(ArcAgi3Agent):
         is_level_up = new_score > prev_score
         diff = self._calculate_diff(prev_grid, new_grid)
 
+        # Format grids using representation config for memory storage
+        formatted_prev_grid = format_grid(prev_grid, self.representation)
+        formatted_new_grid = format_grid(new_grid, self.representation)
+
         entry_header = f"### Turn {len(self.seen_state_actions)}\n\n"
 
         entry_parts_list = [
             f"**Action:** `{action_identifier}`\n\n",
             "**State Before:**\n",
             "```\n",
-            f"{prev_grid}\n",
+            f"{formatted_prev_grid}\n",
             "```\n\n",
             "**Resulting State:**\n",
             "```\n",
-            f"{new_grid}\n",
+            f"{formatted_new_grid}\n",
             "```\n"
         ]
 

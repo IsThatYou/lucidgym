@@ -191,18 +191,18 @@ class ArcAgi3Agent(BaseAgent):
         return await rollout_engine.get_model_response(messages, tools=tools)
     
     def _format_observation(self, observation: dict[str, Any]) -> str:
-        frame = observation["frame"]
+        frame = observation.get("frame", [])
 
         # Use representation config if available
         if self.representation:
             if self.representation.downsample:
-                grid_2d = downsample_4x4(observation["frame"])
+                grid_2d = downsample_4x4(frame) if frame else []
             else:
                 # Get raw 2D grid from 3D frame
                 grid_2d = frame[-1] if frame else []
-            frame_text = format_grid(grid_2d, self.representation)
+            frame_text = format_grid(grid_2d, self.representation) if grid_2d else "No frame data"
         elif self.downsample:
-            frame = [downsample_4x4(observation["frame"])]
+            frame = [downsample_4x4(frame)] if frame else []
             if self.grid:
                 frame_text = frame_to_grid_text(frame)
             else:

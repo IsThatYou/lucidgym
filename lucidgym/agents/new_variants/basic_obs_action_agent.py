@@ -386,11 +386,15 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         # Handle ACTION6 coordinate mapping if needed
         if name == "ACTION6":
-            x_16 = args.get("x", 0)
-            y_16 = args.get("y", 0)
-            # Scale 16x16 coordinates to 64x64 game space (4x upscaling)
-            x_64 = x_16 * 4
-            y_64 = y_16 * 4
+            x_raw = args.get("x", 0)
+            y_raw = args.get("y", 0)
+            # Scale coordinates to 64x64 game space only if using downsampled 16x16 grid
+            if self.downsample:
+                x_64 = x_raw * 4
+                y_64 = y_raw * 4
+            else:
+                x_64 = x_raw
+                y_64 = y_raw
             return {"name": name, "data": {"x": x_64, "y": y_64}, "action_text": model_output.content}
 
         return {"name": name, "data": args, "action_text": model_output.content}

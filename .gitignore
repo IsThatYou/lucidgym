@@ -1,6 +1,11 @@
 wandb/
 checkpoints/
+
 venv/
+.venv/
+env/
+.env
+.env.*
 
 evaluation_results/
 
@@ -8,3 +13,5 @@ memory/
 
 __pycache__/
 *.pyc
+
+*.egg-info/

@@ -300,6 +300,11 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
         prev_grid = self._get_grid_from_frame(prev_grid_3d)
         new_grid = self._get_grid_from_frame(new_grid_3d)
 
+        # Skip memory update if either grid is empty (e.g., NOT_PLAYED state)
+        if not prev_grid or not new_grid:
+            log.debug(f"[{self.game_id}] Skipping memory update: empty grid (prev={bool(prev_grid)}, new={bool(new_grid)})")
+            return False
+
         state_hash = self._get_state_hash(prev_grid)
 
         # Build action identifier

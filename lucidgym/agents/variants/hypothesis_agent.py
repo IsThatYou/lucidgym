@@ -250,6 +250,11 @@ class AS66MemoryAgent(ArcAgi3Agent):
         prev_grid = downsample_4x4(prev_grid_3d, take_last_grid=True, round_to_int=True) if self.downsample else (prev_grid_3d[-1] if prev_grid_3d else [])
         new_grid = downsample_4x4(new_grid_3d, take_last_grid=True, round_to_int=True) if self.downsample else (new_grid_3d[-1] if new_grid_3d else [])
 
+        # Skip memory update if either grid is empty (e.g., NOT_PLAYED state)
+        if not prev_grid or not new_grid:
+            log.debug(f"[{self.game_id}] Skipping memory update: empty grid (prev={bool(prev_grid)}, new={bool(new_grid)})")
+            return False
+
         state_hash = self._get_state_hash(prev_grid)
         action_name = action_dict.get("name", "UNKNOWN")
         action_identifier = action_name

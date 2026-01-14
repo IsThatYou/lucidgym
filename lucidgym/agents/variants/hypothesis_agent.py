@@ -565,6 +565,8 @@ class AS66MemoryAgent(ArcAgi3Agent):
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
         if action.requires_coordinates():
-            action_dict2["x"] = action_dict["data"].get("x", 0)
-            action_dict2["y"] = action_dict["data"].get("y", 0)
+            # Safe dict access - action_dict may not have "data" key
+            data = action_dict.get("data", {})
+            action_dict2["x"] = data.get("x", 0)
+            action_dict2["y"] = data.get("y", 0)
         return action_dict2

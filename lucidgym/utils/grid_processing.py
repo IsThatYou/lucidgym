@@ -428,8 +428,10 @@ def format_ascii(grid: List[List[int]]) -> str:
     for row in grid:
         chars = []
         for v in row:
-            # Map integer (0-15) to palette index
-            idx = int((int(v) / max_val) * (palette_len - 1))
+            # Map integer (0-15) to palette index, clamping to valid range
+            clamped_v = max(0, min(15, int(v)))  # Clamp to 0-15
+            idx = int((clamped_v / max_val) * (palette_len - 1))
+            idx = min(idx, palette_len - 1)  # Safety clamp for edge cases
             chars.append(ASCII_PALETTE[idx])
         lines.append("".join(chars))
 

@@ -388,8 +388,12 @@ class AS66GuidedAgent(ArcAgi3Agent):
 
         # Handle ACTION6 coordinate mapping if needed
         if name == "ACTION6":
-            x_16 = args.get("x", 0)
-            y_16 = args.get("y", 0)
+            # Ensure coordinates are integers (JSON may return strings)
+            x_16 = int(args.get("x", 0))
+            y_16 = int(args.get("y", 0))
+            # Clamp to valid 16x16 range before scaling
+            x_16 = max(0, min(15, x_16))
+            y_16 = max(0, min(15, y_16))
             # Scale 16x16 coordinates to 64x64 game space (4x upscaling)
             x_64 = x_16 * 4
             y_64 = y_16 * 4

@@ -121,8 +121,8 @@ class ArcAgi3Agent(BaseAgent):
 
 
     def update_from_model(self, response: dict | ModelOutput) -> dict:
-        # Handle RESET needed states
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        # Handle RESET needed states (with null safety)
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
         if state in ("NOT_PLAYED", "GAME_OVER"):
             response = ModelOutput(text="Game Over, starting new game.", content="", reasoning="", tool_calls=["RESET"])
         action_payload = {}
@@ -146,8 +146,18 @@ class ArcAgi3Agent(BaseAgent):
                 args = json.loads(arguments or "{}")
                 
                 if name == "ACTION6":
-                    x_pos = int(args.get("x", 0)) * 4 if self.downsample else int(args.get("x", 0))
-                    y_pos = int(args.get("y", 0)) * 4 if self.downsample else int(args.get("y", 0))
+                    x_raw = int(args.get("x", 0))
+                    y_raw = int(args.get("y", 0))
+                    if self.downsample:
+                        # Clamp to 16x16 range before scaling
+                        x_raw = max(0, min(15, x_raw))
+                        y_raw = max(0, min(15, y_raw))
+                        x_pos = x_raw * 4
+                        y_pos = y_raw * 4
+                    else:
+                        # Clamp to 64x64 range
+                        x_pos = max(0, min(63, x_raw))
+                        y_pos = max(0, min(63, y_raw))
                     action_payload["x"] = x_pos
                     action_payload["y"] = y_pos
         action = GameAction.from_name(name)
@@ -173,7 +183,7 @@ class ArcAgi3Agent(BaseAgent):
     # ------------------------------------------------------------------ #
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
 
         # Handle RESET needed states
         # print(f"[DEBUG]:[guided]: obs={obs}")

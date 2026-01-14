@@ -365,8 +365,12 @@ class AS66GuidedAgent64(ArcAgi3Agent):
 
         # Handle ACTION6 coordinates - no scaling needed for 64x64
         if name == "ACTION6":
-            x_64 = args.get("x", 0)
-            y_64 = args.get("y", 0)
+            # Ensure coordinates are integers (JSON may return strings)
+            x_64 = int(args.get("x", 0))
+            y_64 = int(args.get("y", 0))
+            # Clamp to valid 64x64 range
+            x_64 = max(0, min(63, x_64))
+            y_64 = max(0, min(63, y_64))
             return {"name": name, "data": {"x": x_64, "y": y_64}, "action_text": model_output.content}
 
         return {"name": name, "data": args, "action_text": model_output.content}

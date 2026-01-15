@@ -34,19 +34,57 @@ def weave_op(func):
     return func
 
 
-def build_observation_system_text():
-    return (
-        "You are observing a 16x16 grid representation of a game state. "
-        "Each cell contains an ASCII character representing different game elements. "
-        "Your task is to analyze this grid and determine the best action to take. "
-        "The grid shows the current game state with various symbols representing different game objects."
-    )
+def build_observation_system_text(use_as66_prompts: bool = False):
+    if use_as66_prompts:
+        # AS66-specific rules (generic, no hardcoded integer values)
+        return (
+            "You are playing a game represented by a 16×16 grid.\n"
+            "Your task is to observe the position and analyze potential moves.\n\n"
+            "Movement model:\n"
+            "- There is one main movable piece. It may be a unique integer or small block.\n"
+            "- When you choose a direction (Up, Down, Left, Right), the piece slides until blocked.\n"
+            "- Sliding can wrap across board edges if unobstructed.\n"
+            "- If no obstacles in a direction, the piece returns to start (no movement).\n\n"
+            "Obstacles and structures:\n"
+            "- Walls block movement (you stop adjacent to them).\n"
+            "- Target region forms a U-shape (2x3 with center removed). Fill it to win.\n"
+            "- Background cells are the playable area.\n"
+            "- Boundaries delimit the play field.\n"
+            "- Some levels have enemies (large blocks) - collision means game over.\n\n"
+            "For observation, analyze:\n"
+            "1. Locate the movable piece(s) and key structures\n"
+            "2. For each direction, simulate where the piece would land\n"
+            "3. Consider enemy movement if present\n"
+            "4. Determine which direction best progresses toward the goal\n\n"
+            "DO NOT call an action tool here - only provide analysis.\n"
+            "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
+        )
+    else:
+        # Generic prompts
+        return (
+            "You are observing a 16x16 grid representation of a game state. "
+            "Each cell contains an ASCII character representing different game elements. "
+            "Your task is to analyze this grid and determine the best action to take. "
+            "The grid shows the current game state with various symbols representing different game objects."
+        )
 
-def build_action_system_text():
-    return (
-        "You are selecting the best action based on your observation of the game state. "
-        "Choose one of the available actions: ACTION1 (Up), ACTION2 (Down), ACTION3 (Left), ACTION4 (Right), ACTION5 (Enter), ACTION6 (Click)"
-    )
+def build_action_system_text(use_as66_prompts: bool = False):
+    if use_as66_prompts:
+        # AS66-specific action prompt
+        return (
+            "Select exactly one move by calling a single tool. Do not include prose.\n"
+            "Available tools:\n"
+            "- ACTION1 = Up\n"
+            "- ACTION2 = Down\n"
+            "- ACTION3 = Left\n"
+            "- ACTION4 = Right"
+        )
+    else:
+        # Generic action prompt
+        return (
+            "You are selecting the best action based on your observation of the game state. "
+            "Choose one of the available actions: ACTION1 (Up), ACTION2 (Down), ACTION3 (Left), ACTION4 (Right), ACTION5 (Enter), ACTION6 (Click)"
+        )
 
 def _coerce_int(v: Any, default: int = 0) -> int:
     try:
@@ -141,6 +179,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         downsample = True,
         game_id: str | None = None,
         crop_border: int = 0,  # Remove outer N pixels (e.g., 2 for scoring numbers)
+        use_as66_prompts: bool = False,  # Use AS66-specific game rules
     ) -> None:
         """
         Initialize the agent.
@@ -153,6 +192,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
             reasoning_effort: Reasoning effort level
             game_id: Game ID for prompt selection
             crop_border: Remove outer N pixels from grid (e.g., 2 to remove scoring numbers)
+            use_as66_prompts: Use AS66-specific game rules in prompts
         """
         super().__init__(system_prompt=system_prompt, name=name)
         self.input_mode = input_mode
@@ -162,6 +202,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self._system_prompt_override = system_prompt
         self.downsample = downsample
         self.crop_border = crop_border
+        self.use_as66_prompts = use_as66_prompts
 
         if self.input_mode not in ["text_only", "image_only", "text_and_image"]:
             log.warning(f"Invalid input_mode '{self.input_mode}', defaulting to 'text_only'.")
@@ -186,7 +227,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """Return message history formatted for chat API."""
-        system_msg = self._system_prompt_override or build_observation_system_text()
+        system_msg = self._system_prompt_override or build_observation_system_text(self.use_as66_prompts)
         messages: list[dict] = [{"role": "system", "content": system_msg}]
         messages.extend(self._chat_history)
         return messages
@@ -352,7 +393,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
     @weave_op
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
-        sys_msg = build_action_system_text()
+        sys_msg = build_action_system_text(self.use_as66_prompts)
 
         include_text = self.input_mode in ["text_only", "text_and_image"]
         format_clarification = ""

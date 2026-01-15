@@ -610,6 +610,7 @@ def run_evaluation_task(
 
             if "basic_obs_action" in agent_name_cli.lower():
                 agent_kwargs["crop_border"] = args.crop_border
+                agent_kwargs["use_as66_prompts"] = args.use_as66_prompts
                 # Add context_window_size for rolling context variant
                 if "rolling_context" in agent_name_cli.lower():
                     agent_kwargs["context_window_size"] = args.context_window_size
@@ -676,6 +677,8 @@ def main():
         help="Use full 64x64 grid instead of 16x16 downsampled")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
+    parser.add_argument("--use-as66-prompts", dest="use_as66_prompts", action="store_true",
+        help="Use AS66-specific game rules in prompts (for basic_obs_action agents)")
     parser.add_argument("--wandb", dest="use_wandb", action="store_true",
         help="Enable Weights & Biases logging for metrics tracking")
     parser.add_argument("--wandb-project", dest="wandb_project", default="lucidgym-evaluation",
@@ -775,6 +778,7 @@ def main():
                 "input_mode": args.input_mode,
                 "downsample": not args.no_downsample,
                 "use_general_prompts": args.use_general_prompts,
+                "use_as66_prompts": args.use_as66_prompts,
                 "context_length_limit": args.context_length_limit,
                 "include_text_diff": args.include_text_diff,
                 "downsample_images": args.downsample_images,

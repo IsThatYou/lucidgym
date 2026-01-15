@@ -766,12 +766,22 @@ def main():
                 "suite": args.suite,
                 "num_runs": num_runs,
                 "max_actions": args.max_actions,
+                "max_workers": max_workers,
                 "model": args.agent_model_override,
                 "reasoning_effort": args.agent_reasoning_effort,
                 "crop_border": args.crop_border,
+                "context_window_size": args.context_window_size,
                 "grid_format": args.grid_format,
                 "input_mode": args.input_mode,
                 "downsample": not args.no_downsample,
+                "use_general_prompts": args.use_general_prompts,
+                "context_length_limit": args.context_length_limit,
+                "include_text_diff": args.include_text_diff,
+                "downsample_images": args.downsample_images,
+                "image_detail_level": args.image_detail_level,
+                "image_pixels_per_cell": args.image_pixels_per_cell,
+                "arcgame_general_prompts": args.arcgame_general_prompts,
+                "use_weave": args.use_weave,
             }
             log.info(f"  W&B group: {wandb_group}")
             log.info(f"  Each game will create a separate run in this group")

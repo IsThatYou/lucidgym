@@ -82,9 +82,11 @@ class GameMetrics:
     #   Replay  
     replay_url: Optional[str] = None 
 
-    #   Aggregated Totals (for convenience, calculated at the end)  
+    #   Aggregated Totals (for convenience, calculated at the end)
     total_state_changes_across_run: int = 0
     total_game_overs_across_run: int = 0
+    total_actions_taken: int = 0
+    duplicate_actions: int = 0  # Count of duplicate state-action pairs
 
 @dataclass
 class OverallMetrics:

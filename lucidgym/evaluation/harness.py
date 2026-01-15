@@ -7,7 +7,7 @@ import time
 import threading
 import json
 import dataclasses
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, List, Callable, Mapping
@@ -17,6 +17,22 @@ import requests
 import openai
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
+
+# Optional W&B integration
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
+
+# Optional Weave integration for LLM tracing
+try:
+    import weave
+    WEAVE_AVAILABLE = True
+except ImportError:
+    WEAVE_AVAILABLE = False
+    weave = None
 
 # Add project root to sys.path
 project_root = Path(__file__).resolve().parents[2]
@@ -199,9 +215,31 @@ def evaluate_single_game(
     tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
     prompts_log_path: Optional[Path] = None,
+    wandb_project: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_config: Optional[Dict] = None,
+    wandb_tags: Optional[List[str]] = None,
+    # wandb_lock: Optional[threading.Lock] = None,
 ) -> GameMetrics:
     """Run a single env-driven game loop without the BaseAgentWrapper."""
 
+    # Initialize individual W&B run for this game
+    wandb_run = None
+    if wandb_project and wandb_group and WANDB_AVAILABLE:
+        run_name = f"{game_id}_run{run_index}"
+        wandb_run = wandb.init(
+            project=wandb_project,
+            name=run_name,
+            group=wandb_group,
+            job_type="game_eval",
+            config=wandb_config or {},
+            tags=wandb_tags or [],
+            reinit=True,  # Allow multiple init calls in same process
+        )
+        # Define action as the x-axis for metrics to avoid step conflicts
+        if wandb_run:
+            wandb_run.define_metric("action")
+            wandb_run.define_metric("*", step_metric="action")
 
     run_metrics = GameMetrics(
         game_id=game_id,
@@ -221,6 +259,10 @@ def evaluate_single_game(
     total_actions_this_run = 0
     arc_state: Optional[GameState] = None
     arc_score = 0
+
+    # Track state-action pairs to detect duplicates
+    seen_state_action_pairs = set()
+    duplicate_action_count = 0
 
     agent_tools: List[dict[str, Any]] = []
     supports_accumulated_reasoning = bool(rollout_engine and getattr(rollout_engine, "tokenizer", None))
@@ -263,14 +305,54 @@ def evaluate_single_game(
             return attempt_end_time
 
         while total_actions_this_run < max_actions_per_game:
+            # Capture current state before action (use last frame as state representation)
+            state_before_action = None
+            if env._episode_frames:
+                # Create hashable representation of state (use frame data)
+                frame_data = env._episode_frames[-1]
+
+                # Apply crop_border to exclude time/score indicators from state hash
+                frame_for_hash = frame_data.frame
+                if frame_for_hash and hasattr(agent, 'crop_border') and agent.crop_border > 0:
+                    c = agent.crop_border
+                    # Crop each channel of the frame
+                    frame_for_hash = [
+                        [row[c:-c] for row in channel[c:-c]]
+                        for channel in frame_data.frame
+                    ]
+
+                state_hash = hash((
+                    tuple(tuple(tuple(row) for row in channel) for channel in frame_for_hash) if frame_for_hash else (),
+                    # Don't include score in hash since it's in the border we're ignoring
+                    frame_data.state.value if frame_data.state else None
+                ))
+                state_before_action = state_hash
+
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
             print(f"[DEBUG]:harness:action_obj={action_obj}")
-            observation, reward, done, info = _run_with_retries(env.step, action_obj)
-            print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}, _episode_guid:{env._episode_guid}")
 
+            # Get action name for duplicate tracking
+            action_name = action_obj.get("action", "").name if hasattr(action_obj.get("action", ""), "name") else str(action_obj.get("action", ""))
+
+            observation, reward, done, info = _run_with_retries(env.step, action_obj)
+
+            # Increment BEFORE logging to ensure monotonic step counter
             total_actions_this_run += 1
             current_attempt_metrics.actions += 1
+
+            # Check for duplicate state-action pair
+            is_duplicate_action = False
+            if state_before_action is not None:
+                state_action_pair = (state_before_action, action_name)
+                if state_action_pair in seen_state_action_pairs:
+                    is_duplicate_action = True
+                    duplicate_action_count += 1
+                    log.info(f"[{game_id} Run {run_index}] DUPLICATE state-action pair detected at step {total_actions_this_run}: action={action_name}")
+                else:
+                    seen_state_action_pairs.add(state_action_pair)
+
+            print(f"[DEBUG]:harness:[{game_id} Run {run_index}] reward={reward}, done={done}, step={total_actions_this_run}, duplicate={is_duplicate_action}, guid:{env._episode_guid}")
 
             previous_arc_state = arc_state
             previous_arc_score = arc_score
@@ -288,6 +370,8 @@ def evaluate_single_game(
                 current_attempt_number = 1
                 current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
                 attempt_start_time = time.time()
+                # Clear state-action tracking on game reset
+                seen_state_action_pairs.clear()
                 log.info(f"[{game_id} Run {run_index}] Game reset detected (score {previous_arc_score} -> {new_arc_score}). Reset to Level {current_level_number}.")
 
             if len(env._episode_frames) >= 2 and env._episode_frames[-2] != env._episode_frames[-1]:
@@ -299,6 +383,22 @@ def evaluate_single_game(
 
             agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
 
+            # Log metrics to W&B using custom action metric as x-axis
+            if wandb_run and WANDB_AVAILABLE:
+                try:
+                    wandb_run.log({
+                        "action": total_actions_this_run,  # Custom x-axis
+                        "score": arc_score,
+                        "level": current_level_number,
+                        "state": arc_state.value if arc_state else 0,
+                        "highest_level_reached": run_metrics.highest_level_reached,
+                        "state_changes": current_attempt_metrics.state_changes,
+                        "is_duplicate_action": 1 if is_duplicate_action else 0,
+                        "duplicate_action_count": duplicate_action_count,
+                    })  # No step parameter - using custom action metric
+                except Exception as e:
+                    log.debug(f"[{game_id} Run {run_index}] W&B logging error: {e}")
+
             # Log prompts and responses
             if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
                 last_step = agent.trajectory.steps[-1]
@@ -306,7 +406,11 @@ def evaluate_single_game(
                     f.write(f"\n{'='*80}\n")
                     f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
                     f.write(f"Score: {arc_score} | Highest Level Reached: {run_metrics.highest_level_reached}\n")
-                    f.write(f"State: {arc_state.name if arc_state else 'UNKNOWN'}\n")
+                    f.write(f"State: {arc_state.name if arc_state else 'UNKNOWN'}")
+                    if is_duplicate_action:
+                        f.write(f" | ⚠️ DUPLICATE STATE-ACTION PAIR")
+                    f.write(f"\n")
+                    f.write(f"State Changes: {current_attempt_metrics.state_changes} | Duplicate Actions: {duplicate_action_count}\n")
                     f.write(f"{'='*80}\n\n")
 
                     # Log chat completions (prompts and responses)
@@ -416,10 +520,14 @@ def evaluate_single_game(
         run_metrics.total_state_changes_across_run = sum(lm.total_state_changes for lm in run_metrics.level_metrics.values())
         run_metrics.total_actions_taken = total_actions_this_run
         run_metrics.final_score = max_score
+        run_metrics.duplicate_actions = duplicate_action_count
 
         if run_metrics.guid and not run_metrics.replay_url:
             run_metrics.replay_url = f"{ROOT_URL}/replay/{game_id}/{run_metrics.guid}"
 
+        # Close W&B run for this game
+        if wandb_run and WANDB_AVAILABLE:
+            wandb_run.finish()
 
         if rollout_loop is not None:
             rollout_loop.close()
@@ -439,6 +547,10 @@ def run_evaluation_task(
     eval_tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
     prompts_log_dir: Optional[Path] = None,
+    wandb_project: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_config: Optional[Dict] = None,
+    wandb_tags: Optional[List[str]] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
@@ -498,6 +610,9 @@ def run_evaluation_task(
 
             if "basic_obs_action" in agent_name_cli.lower():
                 agent_kwargs["crop_border"] = args.crop_border
+                # Add context_window_size for rolling context variant
+                if "rolling_context" in agent_name_cli.lower():
+                    agent_kwargs["context_window_size"] = args.context_window_size
 
             agent_instance = agent_class(**agent_kwargs)
         else:
@@ -518,6 +633,10 @@ def run_evaluation_task(
             tags=eval_tags,
             rollout_engine=rollout_engine,
             prompts_log_path=prompts_log_path,
+            wandb_project=wandb_project,
+            wandb_group=wandb_group,
+            wandb_config=wandb_config,
+            wandb_tags=wandb_tags,
         )
         log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
         return metrics
@@ -541,6 +660,7 @@ def main():
     parser.add_argument("--include-text-diff", dest="include_text_diff", default="true", help="Value for INCLUDE_TEXT_DIFF.")
     parser.add_argument("--context-length-limit", dest="context_length_limit", type=int, default=-1, help="Value for CONTEXT_LENGTH_LIMIT.")
     parser.add_argument("--crop-border", dest="crop_border", type=int, default=0, help="Remove outer N pixels from 16x16 grid (e.g., 2 for scoring numbers).")
+    parser.add_argument("--context-window-size", dest="context_window_size", type=int, default=5, help="Number of past steps to include in rolling context (default: 5, use 0 for no history).")
     parser.add_argument("--downsample-images", dest="downsample_images", default="true", help="Value for DOWNSAMPLE_IMAGES.")
     parser.add_argument("--image-detail-level", dest="image_detail_level", default="low", help="Value for IMAGE_DETAIL_LEVEL.")
     parser.add_argument("--image-pixels-per-cell", dest="image_pixels_per_cell", type=int, default=24, help="Value for IMAGE_PIXELS_PER_CELL.")
@@ -556,6 +676,14 @@ def main():
         help="Use full 64x64 grid instead of 16x16 downsampled")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
+    parser.add_argument("--wandb", dest="use_wandb", action="store_true",
+        help="Enable Weights & Biases logging for metrics tracking")
+    parser.add_argument("--wandb-project", dest="wandb_project", default="lucidgym-evaluation",
+        help="W&B project name (default: lucidgym-evaluation)")
+    parser.add_argument("--weave", dest="use_weave", action="store_true",
+        help="Enable W&B Weave for LLM tracing and evaluation")
+    parser.add_argument("--weave-project", dest="weave_project", default="lucidgym-evaluation",
+        help="Weave project name in format 'entity/project' (default: lucidgym-evaluation)")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 
@@ -566,15 +694,26 @@ def main():
     
     log.info(f"Agent: '{agent_name_cli}', Suite: '{args.suite}', Games: {len(game_ids)}, Runs per game: {num_runs}, Max workers: {max_workers}, Max Actions: {args.max_actions}")
 
-    api_key = os.getenv("ARC_API_KEY", "") 
+    api_key = os.getenv("ARC_API_KEY", "")
     if not api_key:
         log.error("ARC_API_KEY environment variable not found. Please set it in your .env file.")
-        sys.exit(1) 
+        sys.exit(1)
+
+    # Initialize Weave for LLM tracing if enabled
+    if args.use_weave:
+        if not WEAVE_AVAILABLE:
+            log.warning("Weave tracing requested but weave package not installed. Install with: pip install weave")
+        else:
+            weave.init(args.weave_project)
+            log.info(f"✓ Weave initialized for project: {args.weave_project}")
+            log.info(f"  LLM calls will be automatically traced") 
     
     # --- Setup Results Files (with new naming convention) ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") 
+    # Use EST (UTC-5) for timestamps (without year)
+    est = timezone(timedelta(hours=-5))
+    timestamp = datetime.now(est).strftime("%m%dT%H%M%S") 
 
 
     #  Get all tags for filename AND for passing to threads 
@@ -599,9 +738,43 @@ def main():
     prompts_log_dir = run_dir / "prompts"
     prompts_log_dir.mkdir(exist_ok=True)
     file_lock = threading.Lock()
+    # wandb_lock = threading.Lock()  # Lock for thread-safe W&B logging
     log.info(f"Detailed results (JSONL): {results_filepath_jsonl}")
     log.info(f"Summary report (TXT): {results_filepath_txt}")
     log.info(f"Prompts logs directory: {prompts_log_dir}")
+
+    # Setup W&B group if enabled
+    wandb_group = None
+    wandb_config = None
+    wandb_tags = None
+    if args.use_wandb:
+        if not WANDB_AVAILABLE:
+            log.warning("W&B logging requested but wandb package not installed. Install with: pip install wandb")
+        else:
+            log.info(f"W&B enabled - project: {args.wandb_project}")
+            # Create a group for this entire evaluation session
+            wandb_group = base_dirname
+            # Use shorter tags for W&B (max 64 chars each)
+            wandb_tags = [
+                agent_name_cli,  # Base agent name
+                args.suite,
+                args.agent_model_override.split('/')[-1],  # Model without provider prefix
+            ]
+            # Shared config for all runs in this group
+            wandb_config = {
+                "agent": agent_name_with_variant,
+                "suite": args.suite,
+                "num_runs": num_runs,
+                "max_actions": args.max_actions,
+                "model": args.agent_model_override,
+                "reasoning_effort": args.agent_reasoning_effort,
+                "crop_border": args.crop_border,
+                "grid_format": args.grid_format,
+                "input_mode": args.input_mode,
+                "downsample": not args.no_downsample,
+            }
+            log.info(f"  W&B group: {wandb_group}")
+            log.info(f"  Each game will create a separate run in this group")
 
     overall_start_time = time.time()
     game_metrics_objects_list: List[GameMetrics] = []
@@ -632,6 +805,10 @@ def main():
                     eval_tags,
                     rollout_engine,
                     prompts_log_dir,
+                    args.wandb_project if args.use_wandb else None,
+                    wandb_group,
+                    wandb_config,
+                    wandb_tags,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }

@@ -16,8 +16,22 @@ from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
 
+# Optional Weave integration for LLM tracing
+try:
+    import weave
+    WEAVE_AVAILABLE = True
+except ImportError:
+    WEAVE_AVAILABLE = False
+    weave = None
 
 log = logging.getLogger(__name__)
+
+# Conditional weave decorator
+def weave_op(func):
+    """Apply @weave.op decorator if weave is available, otherwise no-op."""
+    if WEAVE_AVAILABLE and weave:
+        return weave.op(func)
+    return func
 
 
 def build_observation_system_text():
@@ -234,6 +248,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2
 
+    @weave_op
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
         obs = self._last_observation or {}
@@ -294,6 +309,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
 
+    @weave_op
     async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
         """Call the model for observation/reasoning phase."""
         sys_msg = build_observation_system_text()
@@ -327,6 +343,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         text = (getattr(model_output, "content", None) or getattr(model_output, "text", "") or "").strip()
         return text
 
+    @weave_op
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
         sys_msg = build_action_system_text()

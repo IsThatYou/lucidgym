@@ -17,8 +17,22 @@ from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
 
+# Optional Weave integration for LLM tracing
+try:
+    import weave
+    WEAVE_AVAILABLE = True
+except ImportError:
+    WEAVE_AVAILABLE = False
+    weave = None
 
 log = logging.getLogger(__name__)
+
+# Conditional weave decorator
+def weave_op(func):
+    """Apply @weave.op decorator if weave is available, otherwise no-op."""
+    if WEAVE_AVAILABLE and weave:
+        return weave.op(func)
+    return func
 
 
 def build_observation_system_text():
@@ -186,12 +200,13 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         if not self._step_history:
             return ""
 
-        history_lines = ["**Recent History:**"]
+        history_lines = ["**Recent History:**\n"]
         for step_info in self._step_history:
             history_lines.append(
-                f"- Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}"
+                f"Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}, State={step_info['state']}\n"
+                f"Board:\n{step_info['grid']}\n"
             )
-        return "\n".join(history_lines) + "\n\n"
+        return "\n".join(history_lines) + "\n"
 
     def _crop_grid(self, grid: List[List[int]]) -> List[List[int]]:
         """Remove outer N pixels from grid."""
@@ -265,12 +280,26 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             self._trajectory.steps[-1].model_response = response_text
             self._trajectory.steps[-1].action = action_dict
 
-        # Add to step history
+        # Add to step history with full board state
         obs = self._last_observation or {}
+        frame_3d = obs.get("frame", [])
+
+        # Process grid same way as in call_llm
+        if self.downsample and len(frame_3d) > 0:
+            downsampled = downsample_4x4(frame_3d)
+            cropped = self._crop_grid(downsampled)
+            grid_str = frame_to_grid_text([cropped])
+        elif len(frame_3d) > 0:
+            grid_str = frame_to_grid_text([frame_3d])
+        else:
+            grid_str = ""
+
         self._step_history.append({
             "step": self._action_counter,
             "action": action_dict["name"],
-            "score": obs.get("score", 0)
+            "score": obs.get("score", 0),
+            "state": obs.get("state", "UNKNOWN"),
+            "grid": grid_str
         })
 
         self._action_counter += 1
@@ -282,6 +311,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2
 
+    @weave_op
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
         obs = self._last_observation or {}
@@ -338,6 +368,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
 
+    @weave_op
     async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
         """Call the model for observation/reasoning phase."""
         sys_msg = build_observation_system_text()
@@ -352,9 +383,10 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         user_msg_text = (
             f"{history_context}"
+            f"**Current State:**\n"
             f"Score: {score}\n"
-            f"Step: {self._action_counter}\n"
-            f"Matrix {grid_text} (ASCII characters):\n{grid}\n\n"
+            f"Step: {self._action_counter}\n\n"
+            f"**Current Matrix** {grid_text} (ASCII characters):\n{grid}\n\n"
             "Rationale:\n"
             "  • Identify the movable ASCII character(s) and relevant structures.\n"
             "  • Conclude which direction is best and why. Do not output an action here.\n"
@@ -378,6 +410,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         return text
 
+    @weave_op
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
         sys_msg = build_action_system_text()

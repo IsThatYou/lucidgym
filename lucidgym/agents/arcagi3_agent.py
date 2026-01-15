@@ -20,7 +20,8 @@ from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from rllm.engine.rollout.rollout_engine import ModelOutput
 
 from lucidgym.environments.arcagi3.structs import GameAction
-from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text
+from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text, format_grid
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
 
 
@@ -54,7 +55,8 @@ class ArcAgi3Agent(BaseAgent):
         name: str = "arcagi3_agent",
         mode: str = "llm",
         downsample: bool = True,
-        grid = True,
+        grid: bool = True,
+        representation: RepresentationConfig | None = None,
     ) -> None:
         if mode not in {"llm", "passthrough"}:
             raise ValueError("mode must be either 'llm' or 'passthrough'.")
@@ -64,6 +66,10 @@ class ArcAgi3Agent(BaseAgent):
         self._latest_tool_call_id = "call_12345"
         self.downsample = downsample
         self.grid = grid
+        # Representation config for grid formatting
+        self.representation = representation or RepresentationConfig(
+            downsample=downsample,
+        )
         self.reset()
 
     def reset(self) -> None:
@@ -115,8 +121,8 @@ class ArcAgi3Agent(BaseAgent):
 
 
     def update_from_model(self, response: dict | ModelOutput) -> dict:
-        # Handle RESET needed states
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        # Handle RESET needed states (with null safety)
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
         if state in ("NOT_PLAYED", "GAME_OVER"):
             response = ModelOutput(text="Game Over, starting new game.", content="", reasoning="", tool_calls=["RESET"])
         action_payload = {}
@@ -140,8 +146,18 @@ class ArcAgi3Agent(BaseAgent):
                 args = json.loads(arguments or "{}")
                 
                 if name == "ACTION6":
-                    x_pos = int(args.get("x", 0)) * 4 if self.downsample else int(args.get("x", 0))
-                    y_pos = int(args.get("y", 0)) * 4 if self.downsample else int(args.get("y", 0))
+                    x_raw = int(args.get("x", 0))
+                    y_raw = int(args.get("y", 0))
+                    if self.downsample:
+                        # Clamp to 16x16 range before scaling
+                        x_raw = max(0, min(15, x_raw))
+                        y_raw = max(0, min(15, y_raw))
+                        x_pos = x_raw * 4
+                        y_pos = y_raw * 4
+                    else:
+                        # Clamp to 64x64 range
+                        x_pos = max(0, min(63, x_raw))
+                        y_pos = max(0, min(63, y_raw))
                     action_payload["x"] = x_pos
                     action_payload["y"] = y_pos
         action = GameAction.from_name(name)
@@ -167,7 +183,7 @@ class ArcAgi3Agent(BaseAgent):
     # ------------------------------------------------------------------ #
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
 
         # Handle RESET needed states
         # print(f"[DEBUG]:[guided]: obs={obs}")
@@ -185,14 +201,28 @@ class ArcAgi3Agent(BaseAgent):
         return await rollout_engine.get_model_response(messages, tools=tools)
     
     def _format_observation(self, observation: dict[str, Any]) -> str:
-        frame = observation["frame"]
-        if self.downsample:
-            frame = [downsample_4x4(observation["frame"])]
-            
-        if self.grid:
-            frame = frame_to_grid_text(frame)
+        frame = observation.get("frame", [])
+
+        # Use representation config if available
+        if self.representation:
+            if self.representation.downsample:
+                grid_2d = downsample_4x4(frame) if frame else []
+            else:
+                # Get raw 2D grid from 3D frame
+                grid_2d = frame[-1] if frame else []
+            frame_text = format_grid(grid_2d, self.representation) if grid_2d else "No frame data"
+        elif self.downsample:
+            frame = [downsample_4x4(frame)] if frame else []
+            if self.grid:
+                frame_text = frame_to_grid_text(frame)
+            else:
+                frame_text = self.pretty_print_3d(frame)
         else:
-            frame = self.pretty_print_3d(frame)
+            if self.grid:
+                frame_text = frame_to_grid_text(frame)
+            else:
+                frame_text = self.pretty_print_3d(frame)
+
         available_actions = observation.get("available_actions") or []
         if available_actions:
             formatted = ", ".join(
@@ -213,10 +243,8 @@ class ArcAgi3Agent(BaseAgent):
         ).format(
             state=observation.get("state", "UNKNOWN"),
             step=self._steps_this_episode,
-            # card=observation.get("card_id", "?"),
-            # game=observation.get("game_id", "?"),
             score=observation.get("score", 0),
-            frame=frame if frame else "N/A",
+            frame=frame_text if frame_text else "N/A",
         )
         # Output next action:
         # Reply with a several sentences/ paragraphs of plain-text strategy observation about the frame to inform your next action. The output should be a tool call indicating the action to take.

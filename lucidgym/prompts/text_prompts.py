@@ -3,8 +3,11 @@ Multi-game prompt selector with runtime mode switching for text-based observatio
 Supports both detailed per-game prompts and general self-learning prompts.
 """
 from __future__ import annotations
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, TYPE_CHECKING
 import os
+
+if TYPE_CHECKING:
+    from lucidgym.utils.representation import RepresentationConfig
 
 
 # Switch: set in code (default), or override via env var
@@ -203,11 +206,11 @@ GAME_PREFIX_TO_PACK = {
 }
 
 
-# GENERAL (self-learning) pack
+# GENERAL (self-learning) pack - templates with {grid_size} and {max_coord} placeholders
 
-_GENERAL_OBS_SYSTEM = (
-    "GENERAL 16×16 GAME — Learn by observation.\n\n"
-    "You are playing a tile-based game whose rules are unknown a priori. The board is a 16×16 matrix of integers.\n"
+_GENERAL_OBS_SYSTEM_TMPL = (
+    "GENERAL {grid_size} GAME — Learn by observation.\n\n"
+    "You are playing a tile-based game whose rules are unknown a priori. The board is a {grid_size} matrix of integers.\n"
     "Your job is to (1) read the current state, (2) form careful hypotheses about the rules, and (3) propose an action\n"
     "plan that helps test those hypotheses. Do NOT assume a specific genre: the same inputs can mean different things\n"
     "across levels/games.\n\n"
@@ -215,7 +218,7 @@ _GENERAL_OBS_SYSTEM = (
     "Do not over-specify what these do—treat them as probes to learn the rules.\n\n"
     "Core approach:\n"
     "• Identify structures and roles: which integers might be movable entities, terrain/borders, goals/targets, counters,\n"
-    "  hazards, keys/locks, or UI/score indicators. Note any center ‘arena’ vs. surrounding ‘context’ band.\n"
+    "  hazards, keys/locks, or UI/score indicators. Note any center 'arena' vs. surrounding 'context' band.\n"
     "• Seek invariants and conserved quantities (e.g., counts of special integers, sums, connected components, symmetry).\n"
     "• Predict qualitative outcomes of candidate actions (including clicks/space): what is likely to change vs. remain\n"
     "  fixed; which cells may block or enable change; what could be illegal.\n"
@@ -244,7 +247,7 @@ _GENERAL_OBS_USER_TMPL = (
     "{format_clarification}"
 )
 
-_GENERAL_ACT_SYSTEM = (
+_GENERAL_ACT_SYSTEM_TMPL = (
     "ACTION PHASE — Call exactly ONE tool; no prose.\n"
     "Available tools:\n"
     "• RESET                  (restart when NOT_PLAYED or after GAME_OVER)\n"
@@ -255,7 +258,7 @@ _GENERAL_ACT_SYSTEM = (
     "• ACTION5 = Space/Enter/No-op (some games bind a key; otherwise may do nothing)\n"
     "• ACTION6 = Click(x,y)     (click at a coordinate)\n\n"
     "CLICK COORDS (ACTION6):\n"
-    "  - Provide x,y as 16×16 cell indices (0..15) to click that int. "
+    "  - Provide x,y as {grid_size} cell indices (0..{max_coord}) to click that int. "
 )
 
 _GENERAL_ACT_USER_TMPL = (
@@ -263,9 +266,13 @@ _GENERAL_ACT_USER_TMPL = (
     "{matrix_block}\n"
     "Previous observation summary:\n"
     "{last_obs}\n"
-    "If clicking (ACTION6), supply integers x,y (cell indices 0..15). No prose.\n"
+    "If clicking (ACTION6), supply integers x,y (cell indices 0..{max_coord}). No prose.\n"
     "{format_clarification}"
 )
+
+# Static references for backward compatibility (default 16x16)
+_GENERAL_OBS_SYSTEM = _GENERAL_OBS_SYSTEM_TMPL.format(grid_size="16×16", max_coord="15")
+_GENERAL_ACT_SYSTEM = _GENERAL_ACT_SYSTEM_TMPL.format(grid_size="16×16", max_coord="15")
 
 GENERAL_PACK = {
     "obs_system": _GENERAL_OBS_SYSTEM,
@@ -291,11 +298,44 @@ def _select_pack(game_id: Optional[str], use_general: Optional[bool]) -> Dict[st
 
 # Public builders (backward-compatible)
 
+def _get_grid_params(grid_size: str) -> dict:
+    """Convert grid_size string to template parameters."""
+    if grid_size == "64x64":
+        return {"grid_size": "64×64", "max_coord": "63"}
+    else:
+        return {"grid_size": "16×16", "max_coord": "15"}
+
 def build_observation_system_text(
     game_id: Optional[str] = None,
     use_general: Optional[bool] = None,
+    grid_size: str = "16x16",
+    representation: "RepresentationConfig | None" = None,
 ) -> str:
-    return _select_pack(game_id, use_general)["obs_system"].strip()
+    """Build the system prompt for observation phase.
+
+    Args:
+        game_id: Game identifier for selecting game-specific prompts
+        use_general: If True, use general learning prompts without game-specific knowledge
+        grid_size: Grid dimensions ("16x16" or "64x64")
+        representation: Grid representation config for format-aware legend
+    """
+    from lucidgym.utils.representation import RepresentationConfig
+    from lucidgym.prompts.adaptive_prompts import build_format_legend
+
+    is_general = _use_general(use_general)
+
+    if is_general:
+        params = _get_grid_params(grid_size)
+        base_prompt = _GENERAL_OBS_SYSTEM_TMPL.format(**params).strip()
+    else:
+        base_prompt = _select_pack(game_id, use_general)["obs_system"].strip()
+
+    # Add format legend if representation config provided
+    if representation is not None:
+        legend = build_format_legend(representation, for_general=is_general)
+        return f"{base_prompt}\n\n{legend}"
+
+    return base_prompt
 
 def build_observation_user_text(
     ds16: List[List[int]],
@@ -306,17 +346,33 @@ def build_observation_user_text(
     # NEW KWARGS
     format_clarification: str = "",
     include_text_matrix: bool = True,
+    grid_size: str = "16x16",
+    representation: "RepresentationConfig | None" = None,
 ) -> str:
+    """Build the user prompt for observation phase.
+
+    Args:
+        ds16: The grid data (pre-formatted string or raw grid)
+        score: Current score
+        step: Current step number
+        game_id: Game identifier
+        use_general: If True, use general learning prompts
+        format_clarification: Additional clarification about the format
+        include_text_matrix: Whether to include the matrix in the prompt
+        grid_size: Grid dimensions string
+        representation: Grid representation config for format-aware headers
+    """
     if include_text_matrix:
-        # matrix = matrix16_to_lines(ds16)
         matrix = ds16
-        matrix_block = (
-            "Matrix 16x16 (integer codes):\n"
-            f"{matrix}\n"
-        )
+        # Use format-aware header if representation provided
+        if representation is not None:
+            format_desc = representation.get_format_description()
+            matrix_block = f"Current state ({grid_size}, {format_desc}):\n{matrix}\n"
+        else:
+            matrix_block = f"Matrix {grid_size} (integer codes):\n{matrix}\n"
     else:
-        matrix_block = "" # Omit the matrix block entirely
-    
+        matrix_block = ""
+
     tmpl = _select_pack(game_id, use_general)["obs_user_tmpl"]
     return tmpl.format(
         matrix_block=matrix_block,
@@ -328,7 +384,17 @@ def build_observation_user_text(
 def build_action_system_text(
     game_id: Optional[str] = None,
     use_general: Optional[bool] = None,
+    grid_size: str = "16x16",
+    representation: "RepresentationConfig | None" = None,
 ) -> str:
+    """Build the system prompt for action selection phase.
+
+    Note: Action prompts typically don't need the full format legend since
+    it was already provided in the observation phase.
+    """
+    if _use_general(use_general):
+        params = _get_grid_params(grid_size)
+        return _GENERAL_ACT_SYSTEM_TMPL.format(**params).strip()
     return _select_pack(game_id, use_general)["act_system"].strip()
 
 def build_action_user_text(
@@ -339,20 +405,26 @@ def build_action_user_text(
     # NEW KWARGS
     format_clarification: str = "",
     include_text_matrix: bool = True,
+    grid_size: str = "16x16",
+    representation: "RepresentationConfig | None" = None,
 ) -> str:
+    """Build the user prompt for action selection phase."""
     if include_text_matrix:
-        # matrix = matrix16_to_lines(ds16)
         matrix = ds16
-        matrix_block = (
-            "Matrix 16x16 (integer codes):\n"
-            f"{matrix}\n"
-        )
+        # Use format-aware header if representation provided
+        if representation is not None:
+            format_desc = representation.get_format_description()
+            matrix_block = f"Current state ({grid_size}, {format_desc}):\n{matrix}\n"
+        else:
+            matrix_block = f"Matrix {grid_size} (integer codes):\n{matrix}\n"
     else:
-        matrix_block = "" # Omit the matrix block entirely
-    
+        matrix_block = ""
+
+    params = _get_grid_params(grid_size)
     tmpl = _select_pack(game_id, use_general)["act_user_tmpl"]
     return tmpl.format(
         matrix_block=matrix_block,
         last_obs=last_observation_text,
-        format_clarification=format_clarification.strip()
+        format_clarification=format_clarification.strip(),
+        max_coord=params["max_coord"]
     ).strip()

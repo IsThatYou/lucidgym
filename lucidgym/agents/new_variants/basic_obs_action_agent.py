@@ -155,6 +155,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
     def reset(self) -> None:
         """Reset agent state for new episode."""
+        super().reset()  # Initialize parent class attributes including _steps_this_episode
         self._chat_history: list[dict] = []
         self._trajectory = Trajectory(name=self.name)
         self._last_observation: dict[str, Any] | None = None
@@ -385,11 +386,20 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         # Handle ACTION6 coordinate mapping if needed
         if name == "ACTION6":
-            x_16 = args.get("x", 0)
-            y_16 = args.get("y", 0)
-            # Scale 16x16 coordinates to 64x64 game space (4x upscaling)
-            x_64 = x_16 * 4
-            y_64 = y_16 * 4
+            # Ensure coordinates are integers (JSON may return strings)
+            x_raw = _coerce_int(args.get("x", 0))
+            y_raw = _coerce_int(args.get("y", 0))
+            # Scale coordinates to 64x64 game space only if using downsampled 16x16 grid
+            if self.downsample:
+                # Clamp to valid 16x16 range before scaling
+                x_raw = max(0, min(15, x_raw))
+                y_raw = max(0, min(15, y_raw))
+                x_64 = x_raw * 4
+                y_64 = y_raw * 4
+            else:
+                # Clamp to valid 64x64 range
+                x_64 = max(0, min(63, x_raw))
+                y_64 = max(0, min(63, y_raw))
             return {"name": name, "data": {"x": x_64, "y": y_64}, "action_text": model_output.content}
 
         return {"name": name, "data": args, "action_text": model_output.content}

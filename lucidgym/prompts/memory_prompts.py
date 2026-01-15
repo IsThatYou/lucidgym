@@ -3,39 +3,73 @@ Hypothesis-based memory prompts for memory-guided agents.
 Supports initial hypothesis generation, updates, observations, and action selection.
 """
 from __future__ import annotations
-from typing import List
+from typing import List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lucidgym.utils.representation import RepresentationConfig
 
 
 # Initial Hypothesis Generation
 
-def build_initial_hypotheses_system_prompt() -> str:
-    """System prompt for generating the first set of hypotheses."""
-    return (
+def build_initial_hypotheses_system_prompt(
+    representation: "RepresentationConfig | None" = None,
+    use_general: bool = True,
+) -> str:
+    """System prompt for generating the first set of hypotheses.
+
+    Args:
+        representation: Grid representation config for format-aware prompts
+        use_general: Always True for hypothesis agents (they discover rules)
+    """
+    from lucidgym.prompts.adaptive_prompts import build_format_legend
+    from lucidgym.utils.representation import RepresentationConfig
+
+    # Get format description
+    if representation is not None:
+        format_desc = representation.get_format_description()
+        legend = build_format_legend(representation, for_general=True)
+    else:
+        format_desc = "integer codes"
+        legend = "The grid shows integer codes (0-15). Each integer represents a distinct tile type."
+
+    base_prompt = (
         "You are an expert game analyst reverse-engineering a new game. The game is **always deterministic**. "
-        "Your task is to generate five diverse, detailed, and testable hypotheses about the game's core mechanics based on the initial board state (a 16x16 matrix of integers).\n\n"
+        f"Your task is to generate five diverse, detailed, and testable hypotheses about the game's core mechanics based on the initial board state (a 16x16 grid using {format_desc}).\n\n"
+        f"{legend}\n\n"
         "Your hypotheses should be structured around **how this game could be played**. Consider these possibilities:\n"
-        "- **Movement**: Is there a player character? What integer(s) represent it? Does it move via directional inputs (Up, Down, Left, Right)? Does it slide or move one step at a time?\n"
-        "- **Interactions**: Are there objects to collect, obstacles to avoid, or goals to reach? Look for unique integers, contiguous blocks of integers, or patterns that suggest a specific function.\n"
-        "- **State Tracking**: Does some part of the board track game state, like a **move counter** or score? Look for integers that change predictably with every action.\n"
+        "- **Movement**: Is there a player character? What value(s) represent it? Does it move via directional inputs (Up, Down, Left, Right)? Does it slide or move one step at a time?\n"
+        "- **Interactions**: Are there objects to collect, obstacles to avoid, or goals to reach? Look for unique values, contiguous blocks, or patterns that suggest a specific function.\n"
+        "- **State Tracking**: Does some part of the board track game state, like a **move counter** or score? Look for values that change predictably with every action.\n"
         "- **Actions**: Beyond movement, could actions like clicks or spacebar presses have an effect?\n\n"
         "**For each of the five hypotheses, you must provide:**\n"
-        "1.  **A Detailed Paragraph:** Describe the hypothesis. What do different integers represent (player, wall, goal, empty space)? How do they interact? How does movement work?\n"
+        "1.  **A Detailed Paragraph:** Describe the hypothesis. What do different values represent (player, wall, goal, empty space)? How do they interact? How does movement work?\n"
         "2.  **A Concrete Test:** Propose a specific, unambiguous test. This must include:\n"
         "    - The exact action to take (e.g., ACTION1 or ACTION6 with a coordinate).\n"
-        "    - A precise, falsifiable prediction of the outcome. For example: If this hypothesis is true, taking ACTION1 should cause the integer 6 at row 8, column 5 to move to row 7, column 5.\n\n"
+        "    - A precise, falsifiable prediction of the outcome.\n\n"
         "Your goal is to create a scientific framework for understanding the game. These initial hypotheses will be refined after every move.\n\n"
         "Initialize a confidence score out of 10 for each one with some number between 1-3 as we haven't seen any actions yet.\n\n"
         "**Critical Analysis Rules**\n"
         "**Coordinate System:** All grid coordinates are specified as (row, column). The origin (0, 0) is the top-left corner of the matrix. Row numbers increase as you go down, and column numbers increase as you go to the right. Be precise."
     )
+    return base_prompt
 
-def build_initial_hypotheses_user_prompt(ds16: List[List[int]]) -> str:
+def build_initial_hypotheses_user_prompt(
+    ds16: List[List[int]],
+    representation: "RepresentationConfig | None" = None,
+) -> str:
     """User prompt for generating the first set of hypotheses."""
-    # grid_txt = matrix16_to_lines(ds16)
     grid_txt = ds16
+
+    # Use format-aware header if representation provided
+    if representation is not None:
+        format_desc = representation.get_format_description()
+        header = f"**Initial Board State (16x16, {format_desc}):**"
+    else:
+        header = "**Initial Board State (16x16 Matrix):**"
+
     return (
         "Here is the initial state of the game board. Please generate five initial hypotheses about the game's rules, structure, and objectives, each with a concrete test case.\n\n"
-        "**Initial Board State (16x16 Matrix):**\n"
+        f"{header}\n"
         f"{grid_txt}\n"
     )
 
@@ -87,33 +121,66 @@ def build_update_hypotheses_user_prompt(memory_content: str) -> str:
 
 # Observation Step
 
-def build_observation_system_prompt() -> str:
-    """System prompt for the observation step, which now generates a text rationale."""
+def build_observation_system_prompt(
+    representation: "RepresentationConfig | None" = None,
+) -> str:
+    """System prompt for the observation step, which now generates a text rationale.
+
+    Args:
+        representation: Grid representation config for format-aware prompts
+    """
+    from lucidgym.prompts.adaptive_prompts import build_format_legend
+    from lucidgym.utils.representation import RepresentationConfig
+
+    # Get format description
+    if representation is not None:
+        format_desc = representation.get_format_description()
+        legend = build_format_legend(representation, for_general=True)
+    else:
+        format_desc = "integer codes"
+        legend = ""
+
+    legend_section = f"\n\n{legend}" if legend else ""
+
     return (
         "You are a strategic AI game player. Your goal is to win by making intelligent, evidence-based moves. "
         "You have a memory file containing a history of past moves and your current working hypotheses about the game rules.\n\n"
+        f"The board state is represented using {format_desc}.{legend_section}\n\n"
         "**CRITICAL REMINDER ON INDEXING**: All grid coordinates are `(row, column)`. The origin `(0, 0)` is the **top-left corner**. Be precise and double-check your coordinates before making a recommendation.\n\n"
         "**Your multi-step reasoning process for this turn is as follows:**\n"
         "1.  **Analyze the Memory and Hypotheses:** What have you learned so far? Which hypotheses are strong, and which need testing?\n"
-        "2.  **Analyze the Current State:** Scrutinize the 16x16 board. Identify unique integers, their coordinates, and any contiguous blocks. Note what is different from the last time you saw this state, if applicable.\n"
+        "2.  **Analyze the Current State:** Scrutinize the 16x16 board. Identify unique values, their coordinates, and any contiguous blocks. Note what is different from the last time you saw this state, if applicable.\n"
         "3.  **Predict Outcomes:** For each possible action (`ACTION1` through `ACTION6`), briefly predict what will happen based on your hypotheses. For `ACTION6`, specify the exact `(row, column)` coordinate you would click.\n"
         "4.  **Recommend an Action:** Conclude with a clear recommendation for the single best action to take next. This action should either move you closer to winning or be a deliberate experiment to test a key hypothesis.\n\n"
         "Your output should be a detailed, free-text rationale explaining your thought process. End your response with a clear recommendation, like 'My recommended action is ACTION1.'\n\n"
         "**BEHAVIORAL RULES:**\n"
         "- Do not repeat a past action that resulted in no significant state change. A changing move counter on the edge is **not** a significant state change.\n"
-        "- Treat any group of identical, connected integers as a single object. There is no benefit to clicking different parts of the same uniform block.\n"
+        "- Treat any group of identical, connected values as a single object. There is no benefit to clicking different parts of the same uniform block.\n"
         "- You **must** recommend `RESET` if the game state is `GAME_OVER`."
     )
 
-def build_observation_user_prompt(memory_content: str, ds16: List[List[int]], score: int, step: int) -> str:
+def build_observation_user_prompt(
+    memory_content: str,
+    ds16: List[List[int]],
+    score: int,
+    step: int,
+    representation: "RepresentationConfig | None" = None,
+) -> str:
     """User prompt for the observation step."""
-    # grid_txt = matrix16_to_lines(ds16)
     grid_txt = ds16
+
+    # Use format-aware header if representation provided
+    if representation is not None:
+        format_desc = representation.get_format_description()
+        header = f"**Current Board State (16x16, {format_desc}):**"
+    else:
+        header = "**Current Board State (16x16 Matrix):**"
+
     return (
         f"**Current Game Status:**\n"
         f"- Step: {step}\n"
         f"- Score: {score}\n\n"
-        "**Current Board State (16x16 Matrix):**\n"
+        f"{header}\n"
         "```\n"
         f"{grid_txt}\n"
         "```\n\n"

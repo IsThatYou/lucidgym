@@ -1,0 +1,74 @@
+#!/bin/bash
+#SBATCH --job-name=lucidgym_eval
+#SBATCH --partition=common
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=16G
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/slurm_%j.out
+#SBATCH --error=logs/slurm_%j.err
+
+# Usage: sbatch run_harness_configurable.sbatch [agent_name] [suite] [num_runs] [max_workers]
+# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context training_suite 30 30
+
+# Default values
+AGENT=${1:-basic_obs_action_agent_rolling_context}
+SUITE=${2:-debug_suite}
+NUM_RUNS=${3:-1}
+MAX_WORKERS=${4:-1}
+MAX_ACTIONS=${5:-500}
+MODEL=${6:-openai/gpt-5-nano}
+REASONING=${7:-high}
+
+# Create logs directory if it doesn't exist
+mkdir -p logs
+
+# Load required modules (adjust based on DCC available modules)
+# module load Python/3.10.x  # Uncomment if needed
+
+# Activate conda environment
+source ~/.bashrc
+conda activate lucidgym
+
+# Print environment info for debugging
+echo "=========================================="
+echo "Job started at: $(date)"
+echo "Running on node: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
+echo "Memory allocated: 16G"
+echo "Python version: $(python --version)"
+echo "Working directory: $(pwd)"
+echo "=========================================="
+echo "Run Configuration:"
+echo "  Agent: $AGENT"
+echo "  Suite: $SUITE"
+echo "  Num Runs: $NUM_RUNS"
+echo "  Max Workers: $MAX_WORKERS"
+echo "  Max Actions: $MAX_ACTIONS"
+echo "  Model: $MODEL"
+echo "  Reasoning Effort: $REASONING"
+echo "=========================================="
+
+# Set environment variables
+export PYTHONUNBUFFERED=1
+
+# Run the harness
+python -m lucidgym.evaluation.harness \
+    --agent "$AGENT" \
+    --suite "$SUITE" \
+    --num_runs "$NUM_RUNS" \
+    --max_actions "$MAX_ACTIONS" \
+    --max_workers "$MAX_WORKERS" \
+    --agent-model "$MODEL" \
+    --agent-reasoning-effort "$REASONING" \
+    --weave \
+    --weave-project lucidgym-eval
+
+EXIT_CODE=$?
+
+echo "=========================================="
+echo "Job finished at: $(date)"
+echo "Exit code: $EXIT_CODE"
+echo "=========================================="
+
+exit $EXIT_CODE

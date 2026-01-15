@@ -194,6 +194,8 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         self._last_observation_response: str = ""
         self._last_action_prompt: str = ""
         self._last_action_response: str = ""
+        # Track last executed action to prevent double RESETs
+        self._last_executed_action: str | None = None
 
     def _format_step_history(self) -> str:
         """Format step history as context string."""
@@ -304,6 +306,8 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         self._action_counter += 1
         self._pending_action = None
+        # Track last executed action to prevent double RESETs
+        self._last_executed_action = action_dict["name"]
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
         if action.requires_coordinates():
@@ -317,7 +321,9 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         obs = self._last_observation or {}
         state = obs.get("state", "NOT_PLAYED")
 
-        if state in ("NOT_PLAYED", "GAME_OVER"):
+        # Only auto-RESET if state requires it AND we didn't just execute RESET
+        # This prevents double RESETs that cause score to drop
+        if state in ("NOT_PLAYED", "GAME_OVER") and self._last_executed_action != "RESET":
             action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
             self._pending_action = action_dict
             return action_dict

@@ -1,9 +1,10 @@
 """
-16x16 text-based guided agents with multi-modal support.
-Implements observation-action loop with downsampled grid representations.
+16x16 text-based guided agents with rolling context.
+Maintains history of last k steps to provide context in prompts.
 """
 from __future__ import annotations
 from typing import Any, Optional, List, Dict
+from collections import deque
 import json
 import logging
 import base64
@@ -112,24 +113,26 @@ def _build_tools() -> list[dict]:
     ]
 
 
-class BasicObsActionAgent(ArcAgi3Agent):
+class BasicObsActionAgentRollingContext(ArcAgi3Agent):
     """
-    Basic agent that generates an observation, and based on that generates an action.
+    Basic agent with rolling context of last k steps.
+    Includes step history in prompts to provide context.
     """
 
     def __init__(
         self,
         system_prompt: str | None = None,
-        name: str = "basic_obs_action_agent",
+        name: str = "basic_obs_action_agent_rolling_context",
         input_mode: str = "text_only",
         model: str = "gpt-5-nano",
         reasoning_effort: str = "low",
         downsample = True,
         game_id: str | None = None,
+        context_window_size: int = 5,  # Keep last k steps in context
         crop_border: int = 0,  # Remove outer N pixels (e.g., 2 for scoring numbers)
     ) -> None:
         """
-        Initialize the agent.
+        Initialize the agent with rolling context.
 
         Args:
             system_prompt: Override system prompt (optional)
@@ -137,9 +140,15 @@ class BasicObsActionAgent(ArcAgi3Agent):
             input_mode: 'text_only', 'image_only', or 'text_and_image'
             model: OpenAI model to use
             reasoning_effort: Reasoning effort level
+            downsample: Whether to downsample the grid
             game_id: Game ID for prompt selection
+            context_window_size: Number of recent steps to keep in context
             crop_border: Remove outer N pixels from grid (e.g., 2 to remove scoring numbers)
         """
+        # Set context_window_size before calling super().__init__ because parent calls reset()
+        self.context_window_size = context_window_size
+        self.crop_border = crop_border
+
         super().__init__(system_prompt=system_prompt, name=name)
         self.input_mode = input_mode
         self.model = model
@@ -147,7 +156,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self.game_id = game_id
         self._system_prompt_override = system_prompt
         self.downsample = downsample
-        self.crop_border = crop_border
 
         if self.input_mode not in ["text_only", "image_only", "text_and_image"]:
             log.warning(f"Invalid input_mode '{self.input_mode}', defaulting to 'text_only'.")
@@ -155,17 +163,42 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         self._client = get_openai_client(model=model)
         self._latest_tool_call_id = "call_12345"
-        self.reset()
 
     def reset(self) -> None:
         """Reset agent state for new episode."""
-        super().reset()  # Initialize parent class attributes including _steps_this_episode
+        super().reset()
         self._chat_history: list[dict] = []
         self._trajectory = Trajectory(name=self.name)
         self._last_observation: dict[str, Any] | None = None
         self._token_total: int = 0
         self._action_counter: int = 0
         self._pending_action: dict[str, Any] | None = None
+        # Rolling context: track last k steps
+        self._step_history: deque = deque(maxlen=self.context_window_size)
+        # Store actual prompts/responses for logging
+        self._last_observation_prompt: str = ""
+        self._last_observation_response: str = ""
+        self._last_action_prompt: str = ""
+        self._last_action_response: str = ""
+
+    def _format_step_history(self) -> str:
+        """Format step history as context string."""
+        if not self._step_history:
+            return ""
+
+        history_lines = ["**Recent History:**"]
+        for step_info in self._step_history:
+            history_lines.append(
+                f"- Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}"
+            )
+        return "\n".join(history_lines) + "\n\n"
+
+    def _crop_grid(self, grid: List[List[int]]) -> List[List[int]]:
+        """Remove outer N pixels from grid."""
+        if self.crop_border <= 0:
+            return grid
+        c = self.crop_border
+        return [row[c:-c] for row in grid[c:-c]]
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
@@ -184,19 +217,29 @@ class BasicObsActionAgent(ArcAgi3Agent):
         """Process environment observation and update state."""
         self._last_observation = observation
 
+        # Build full prompt/response log
+        full_prompts = []
+        if self._last_observation_prompt:
+            full_prompts.append({"role": "observation_phase", "content": self._last_observation_prompt})
+        if self._last_observation_response:
+            full_prompts.append({"role": "observation_response", "content": self._last_observation_response})
+        if self._last_action_prompt:
+            full_prompts.append({"role": "action_phase", "content": self._last_action_prompt})
+        if self._last_action_response:
+            full_prompts.append({"role": "action_response", "content": self._last_action_response})
+
         # Store in trajectory
         step = Step(
             observation=observation,
             reward=reward,
             done=done,
             info=info,
-            chat_completions=self.chat_completions.copy()
+            chat_completions=full_prompts
         )
         self._trajectory.steps.append(step)
 
         # Add tool response to chat history
         if self._chat_history and self._chat_history[-1].get("role") == "assistant":
-            # Format observation as tool response
             tool_content = self._format_observation(observation)
 
             self._chat_history.append({
@@ -213,17 +256,22 @@ class BasicObsActionAgent(ArcAgi3Agent):
         response_text = f"Observation: {obs_text}\nAction Text: {action_text}\nAction: {action_dict['name']}"
 
         if action_dict is None:
-            # Fallback to internal generation to preserve legacy behavior
             response_text, action_dict = self.call_llm()
 
         if not response_text:
             response_text = str(action_dict)
 
-        # print(f"Observation: {obs_text}\nAction: {action_text}\nResponse: {response_text}")
-
         if self._trajectory.steps:
             self._trajectory.steps[-1].model_response = response_text
             self._trajectory.steps[-1].action = action_dict
+
+        # Add to step history
+        obs = self._last_observation or {}
+        self._step_history.append({
+            "step": self._action_counter,
+            "action": action_dict["name"],
+            "score": obs.get("score", 0)
+        })
 
         self._action_counter += 1
         self._pending_action = None
@@ -239,8 +287,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
         obs = self._last_observation or {}
         state = obs.get("state", "NOT_PLAYED")
 
-        # Handle RESET needed states
-        # print(f"[DEBUG]:[guided]: obs={obs}")
         if state in ("NOT_PLAYED", "GAME_OVER"):
             action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
             self._pending_action = action_dict
@@ -250,19 +296,17 @@ class BasicObsActionAgent(ArcAgi3Agent):
         frame_3d = obs.get("frame", [])
 
         if self.downsample:
-            grid = frame_to_grid_text([downsample_4x4(frame_3d)])
+            downsampled = downsample_4x4(frame_3d)
+            cropped = self._crop_grid(downsampled)
+            grid = frame_to_grid_text([cropped])
         else:
             grid = frame_to_grid_text([frame_3d])
         score = obs.get("score", 0)
 
-        # DEBUG alternate between ACTION1 and ACTION2
-        # action_name = "ACTION1" if self._action_counter % 2 == 0 else "ACTION2"
-        # action_dict = {"name": action_name, "data": {}, "obs_text": "", "action_text": ""}
-            
-        # # Step 1: Observation phase
+        # Step 1: Observation phase
         obs_text = await self._call_observation_model(grid, score, rollout_engine=rollout_engine)
 
-        # # Step 2: Action selection phase
+        # Step 2: Action selection phase
         action_dict = await self._call_action_model(grid, obs_text, rollout_engine=rollout_engine)
         action_dict["obs_text"] = obs_text
 
@@ -298,15 +342,16 @@ class BasicObsActionAgent(ArcAgi3Agent):
         """Call the model for observation/reasoning phase."""
         sys_msg = build_observation_system_text()
 
-        include_text = self.input_mode in ["text_only", "text_and_image"]
-        grid_text = "16x16" if self.downsample else "64x64"
-        format_clarification = ""
-        if self.input_mode == "image_only":
-            format_clarification = f"The board state is provided as an attached image of the {grid_text} grid."
-        elif self.input_mode == "text_and_image":
-            format_clarification = "The board state is provided as both a textual matrix and an attached image."
+        if self.downsample:
+            base_size = 16
+            actual_size = base_size - (2 * self.crop_border)
+            grid_text = f"{actual_size}x{actual_size}" if self.crop_border > 0 else "16x16"
+        else:
+            grid_text = "64x64"
+        history_context = self._format_step_history()
 
         user_msg_text = (
+            f"{history_context}"
             f"Score: {score}\n"
             f"Step: {self._action_counter}\n"
             f"Matrix {grid_text} (ASCII characters):\n{grid}\n\n"
@@ -316,54 +361,55 @@ class BasicObsActionAgent(ArcAgi3Agent):
             "  • Focus on the strategic importance of each character and how it relates to the goal."
         )
 
-        user_content = self._build_user_content(grid, user_msg_text)
+        # Store prompt for logging
+        self._last_observation_prompt = f"SYSTEM: {sys_msg}\n\nUSER: {user_msg_text}"
 
+        # Use text-only content for rollout engine (multimodal not supported)
         messages = [
             {"role": "system", "content": sys_msg},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": user_msg_text}
         ]
 
         model_output = await self.rollout(rollout_engine, messages)
         text = (getattr(model_output, "content", None) or getattr(model_output, "text", "") or "").strip()
+
+        # Store response for logging
+        self._last_observation_response = text
+
         return text
 
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
         sys_msg = build_action_system_text()
 
-        include_text = self.input_mode in ["text_only", "text_and_image"]
-        format_clarification = ""
-        if self.input_mode == "image_only":
-            format_clarification = "The board state is provided as an attached image."
-        elif self.input_mode == "text_and_image":
-            format_clarification = "The board state is provided as both text and image."
+        history_context = self._format_step_history()
 
         user_msg_text = (
+            f"{history_context}"
             "Choose the best single move as a function call.\n"
             f"{grid}"
             "Previous observation summary:\n"
             f"{last_obs}\n"
         )
 
-        user_content = self._build_user_content(grid, user_msg_text)
+        # Store prompt for logging
+        self._last_action_prompt = f"SYSTEM: {sys_msg}\n\nUSER: {user_msg_text}"
+
         tools = _build_tools()
 
+        # Use text-only content for rollout engine (multimodal not supported)
         messages = [
             {"role": "system", "content": sys_msg},
-            {"role": "user", "content": user_content}
+            {"role": "user", "content": user_msg_text}
         ]
 
         model_output = await self.rollout(rollout_engine, messages, tools)
 
         m = model_output.tool_calls[0] if getattr(model_output, "tool_calls", None) else None
 
-        # Note: GPT-5 models perform reasoning internally but don't expose reasoning content in API responses.
-        # The reasoning_effort parameter controls the amount of thinking, but the actual reasoning
-        # text is not returned. We can only see reasoning_tokens in usage stats.
-
         print(f"[DEBUG]:guided_text_16:model_output={model_output}")
         print(f"[DEBUG]:guided_text_16:rollout_engine._use_chat_completions={getattr(rollout_engine, '_use_chat_completions', 'N/A')}")
-        # return {"name": "ACTION6", "data": {"x": 7, "y": 7}, "action_text": "ACTION6"}
+
         if m is None:
             return {"name": "ACTION5", "data": {}, "action_text": "ACTION5"}
 
@@ -387,6 +433,10 @@ class BasicObsActionAgent(ArcAgi3Agent):
                 "function": {"name": name, "arguments": arguments}
             }]
         })
+
+        # Store response for logging
+        action_content = model_output.content or ""
+        self._last_action_response = f"Tool Call: {name}({json.dumps(args)})\nContent: {action_content}"
 
         # Handle ACTION6 coordinate mapping if needed
         if name == "ACTION6":

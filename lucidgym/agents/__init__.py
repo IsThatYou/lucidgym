@@ -9,6 +9,7 @@ from .variants.hypothesis_agent import AS66MemoryAgent
 from .variants.visual_hypothesis_agent import AS66VisualMemoryAgent
 from .variants.meta_coding_harness_agent import MetaCodingHarnessAgent
 from .new_variants.basic_obs_action_agent import BasicObsActionAgent
+from .new_variants.basic_obs_action_agent_rolling_context import BasicObsActionAgentRollingContext
 
 # Agent registry for evaluation harness
 AVAILABLE_AGENTS = {
@@ -21,6 +22,7 @@ AVAILABLE_AGENTS = {
     "as66_visual_memory_agent": AS66VisualMemoryAgent,
     "meta_coding_harness_agent": MetaCodingHarnessAgent,
     "basic_obs_action_agent": BasicObsActionAgent,
+    "basic_obs_action_agent_rolling_context": BasicObsActionAgentRollingContext,
 }
 
 __all__ = [
@@ -33,5 +35,6 @@ __all__ = [
     "AS66VisualMemoryAgent",
     "MetaCodingHarnessAgent",
     "BasicObsActionAgent",
+    "BasicObsActionAgentRollingContext",
     "AVAILABLE_AGENTS",
 ]

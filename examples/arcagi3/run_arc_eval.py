@@ -43,20 +43,21 @@ def setup_rollout_engine(model) -> OpenAIEngine:
     # Provider selection
     together_api_key = os.getenv("TOGETHER_API_KEY")
     openai_api_key = os.getenv("OPENAI_API_KEY")
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
     tokenizer = None
     sampling_params = {
         "temperature": 1,
     }
     disable_thinking = False
     if model.startswith("gpt-"):
-        api_key = openai_api_key
-        base_url = "https://api.openai.com/v1"
+        api_key = openai_api_key or openrouter_api_key
+        base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not openai_api_key else "https://api.openai.com/v1"
         model_name = model
         sampling_params["max_completion_tokens"] = 8192
-        sampling_params["reasoning_effort"] = "low"   
+        sampling_params["reasoning_effort"] = "low"
     else:
-        api_key = together_api_key
-        base_url = "https://api.together.xyz/v1"
+        api_key = together_api_key or openrouter_api_key
+        base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not together_api_key else "https://api.together.xyz/v1"
         model_name = model
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
         sampling_params["max_tokens"] = 8192

@@ -48,19 +48,38 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
     """
     together_api_key = os.getenv("TOGETHER_API_KEY", "").strip()
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+    # If model has a provider prefix (contains "/"), force OpenRouter
+    has_provider_prefix = "/" in model_name
 
     tokenizer = None
-    api_key = openai_api_key
-    base_url = "https://api.openai.com/v1"
+    if has_provider_prefix:
+        # Use OpenRouter for provider-prefixed models
+        api_key = openrouter_api_key
+        base_url = "https://openrouter.ai/api/v1"
+    else:
+        # Default priority: OPENAI_API_KEY > OPENROUTER_API_KEY
+        api_key = openai_api_key or openrouter_api_key
+        base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not openai_api_key else "https://api.openai.com/v1"
 
-    # Use Together/Qwen tokenizer when the model is not an OpenAI-prefixed model.
-    if not model_name.startswith("gpt-"):
-        api_key = together_api_key
-        base_url = "https://api.together.xyz/v1"
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+    # Use Together/Qwen tokenizer when the model is not an OpenAI model
+    # Check both "gpt-" and "openai/gpt-" formats, as well as o1/o3 models
+    model_base = model_name.split("/")[-1]  # Get model name after provider prefix
+    is_openai_model = model_base.startswith("gpt-") or model_base.startswith("o1-") or model_base.startswith("o3-")
+
+    if not is_openai_model:
+        if has_provider_prefix:
+            # Already using OpenRouter, don't load tokenizer
+            pass
+        else:
+            # Non-OpenAI model without prefix, use Together or OpenRouter with tokenizer
+            api_key = together_api_key or openrouter_api_key
+            base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not together_api_key else "https://api.together.xyz/v1"
+            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
 
     if not api_key:
-        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
+        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY, TOGETHER_API_KEY, or OPENROUTER_API_KEY.")
 
     sampling_params = {
         "temperature": 1,
@@ -68,9 +87,11 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
     }
 
     # Only add reasoning_effort for models that support it (gpt-5.x and o-series models)
-    supports_reasoning = model_name.startswith("gpt-5") or model_name.startswith("o1") or model_name.startswith("o3")
+    supports_reasoning = model_base.startswith("gpt-5") or model_base.startswith("o1") or model_base.startswith("o3")
     if supports_reasoning and reasoning_effort and reasoning_effort != "none":
         sampling_params["reasoning_effort"] = reasoning_effort
+
+    log.info(f"OpenAIEngine config: model={model_name}, base_url={base_url}, tokenizer={'loaded' if tokenizer else 'None'}, sampling_params={sampling_params}")
 
     return OpenAIEngine(
         model=model_name,
@@ -117,6 +138,11 @@ def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
     context_limit = args.context_length_limit
     if context_limit != -1:
         tags.append(f"ctx{context_limit // 1000}k")
+
+    # Crop Border
+    crop_border = args.crop_border
+    if crop_border > 0:
+        tags.append(f"crop{crop_border}")
 
     # Downsample
     downsample_images = args.downsample_images.lower() == "true"
@@ -172,6 +198,7 @@ def evaluate_single_game(
     run_index: int,
     tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
+    prompts_log_path: Optional[Path] = None,
 ) -> GameMetrics:
     """Run a single env-driven game loop without the BaseAgentWrapper."""
 
@@ -253,6 +280,16 @@ def evaluate_single_game(
             run_metrics.guid = run_metrics.guid or arc_info.get("guid")
             run_metrics.replay_url = run_metrics.replay_url or arc_info.get("replay_url")
 
+            # Detect if game reset to an earlier level (score dropped)
+            if new_arc_score < previous_arc_score:
+                # Game was reset, sync current_level_number to actual game level
+                current_level_number = new_arc_score + 1
+                current_level_metrics = LevelMetrics(level_number=current_level_number)
+                current_attempt_number = 1
+                current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
+                attempt_start_time = time.time()
+                log.info(f"[{game_id} Run {run_index}] Game reset detected (score {previous_arc_score} -> {new_arc_score}). Reset to Level {current_level_number}.")
+
             if len(env._episode_frames) >= 2 and env._episode_frames[-2] != env._episode_frames[-1]:
                 current_attempt_metrics.state_changes += 1
             arc_state = new_arc_state
@@ -261,6 +298,41 @@ def evaluate_single_game(
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
             agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
+
+            # Log prompts and responses
+            if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
+                last_step = agent.trajectory.steps[-1]
+                with open(prompts_log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
+                    f.write(f"Score: {arc_score} | Highest Level Reached: {run_metrics.highest_level_reached}\n")
+                    f.write(f"State: {arc_state.name if arc_state else 'UNKNOWN'}\n")
+                    f.write(f"{'='*80}\n\n")
+
+                    # Log chat completions (prompts and responses)
+                    if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
+                        for msg in last_step.chat_completions:
+                            role = msg.get('role', 'unknown')
+                            content = msg.get('content', '')
+
+                            if role == 'observation_phase':
+                                f.write("OBSERVATION PHASE PROMPT:\n")
+                                f.write("-" * 80 + "\n")
+                                f.write(f"{content}\n\n")
+                            elif role == 'observation_response':
+                                f.write("OBSERVATION RESPONSE:\n")
+                                f.write("-" * 80 + "\n")
+                                f.write(f"{content}\n\n")
+                            elif role == 'action_phase':
+                                f.write("ACTION PHASE PROMPT:\n")
+                                f.write("-" * 80 + "\n")
+                                f.write(f"{content}\n\n")
+                            elif role == 'action_response':
+                                f.write("ACTION RESPONSE:\n")
+                                f.write("-" * 80 + "\n")
+                                f.write(f"{content}\n\n")
+                            else:
+                                f.write(f"[{role.upper()}]\n{content}\n\n")
 
             # --- Handle Level Completion ---
             level_completed = (new_arc_score > previous_arc_score and 
@@ -275,7 +347,6 @@ def evaluate_single_game(
                 log.info(f"[{game_id} Run {run_index}] Level {current_level_number} COMPLETED. Attempt {current_attempt_number} actions: {current_attempt_metrics.actions}. Score: {new_arc_score}.")
 
                 current_level_number += 1
-                run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
                 current_level_metrics = LevelMetrics(level_number=current_level_number)
                 current_attempt_number = 1
                 current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
@@ -367,6 +438,7 @@ def run_evaluation_task(
     agent_name_with_variant: str,
     eval_tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
+    prompts_log_dir: Optional[Path] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
@@ -424,9 +496,17 @@ def run_evaluation_task(
                 agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
                 agent_kwargs["representation"] = rep_config
 
+            if "basic_obs_action" in agent_name_cli.lower():
+                agent_kwargs["crop_border"] = args.crop_border
+
             agent_instance = agent_class(**agent_kwargs)
         else:
             raise ValueError(f"Agent class {agent_class} is not a subclass of BaseAgent.")
+
+        # Create prompts log file
+        prompts_log_path = None
+        if prompts_log_dir:
+            prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
 
         metrics = evaluate_single_game(
             agent=agent_instance,
@@ -437,6 +517,7 @@ def run_evaluation_task(
             run_index=run_index,
             tags=eval_tags,
             rollout_engine=rollout_engine,
+            prompts_log_path=prompts_log_path,
         )
         log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
         return metrics
@@ -459,6 +540,7 @@ def main():
     parser.add_argument("--agent-reasoning-effort", dest="agent_reasoning_effort", default="low", help="Override the agent's default reasoning effort.")
     parser.add_argument("--include-text-diff", dest="include_text_diff", default="true", help="Value for INCLUDE_TEXT_DIFF.")
     parser.add_argument("--context-length-limit", dest="context_length_limit", type=int, default=-1, help="Value for CONTEXT_LENGTH_LIMIT.")
+    parser.add_argument("--crop-border", dest="crop_border", type=int, default=0, help="Remove outer N pixels from 16x16 grid (e.g., 2 for scoring numbers).")
     parser.add_argument("--downsample-images", dest="downsample_images", default="true", help="Value for DOWNSAMPLE_IMAGES.")
     parser.add_argument("--image-detail-level", dest="image_detail_level", default="low", help="Value for IMAGE_DETAIL_LEVEL.")
     parser.add_argument("--image-pixels-per-cell", dest="image_pixels_per_cell", type=int, default=24, help="Value for IMAGE_PIXELS_PER_CELL.")
@@ -505,14 +587,21 @@ def main():
     rollout_reasoning_effort = args.agent_reasoning_effort
     rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
     
-    # Build comprehensive filename
-    base_filename = f"{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}_{timestamp}"
-    
-    results_filepath_jsonl = results_dir / f"{base_filename}.jsonl"
-    results_filepath_txt = results_dir / f"{base_filename}.summary.txt" 
+    # Build comprehensive filename (date first for natural sorting)
+    base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
+
+    # Create a folder for this evaluation run
+    run_dir = results_dir / base_dirname
+    run_dir.mkdir(exist_ok=True)
+
+    results_filepath_jsonl = run_dir / "results.jsonl"
+    results_filepath_txt = run_dir / "summary.txt"
+    prompts_log_dir = run_dir / "prompts"
+    prompts_log_dir.mkdir(exist_ok=True)
     file_lock = threading.Lock()
     log.info(f"Detailed results (JSONL): {results_filepath_jsonl}")
     log.info(f"Summary report (TXT): {results_filepath_txt}")
+    log.info(f"Prompts logs directory: {prompts_log_dir}")
 
     overall_start_time = time.time()
     game_metrics_objects_list: List[GameMetrics] = []
@@ -534,14 +623,15 @@ def main():
                 executor.submit(
                     run_evaluation_task,
                     args,
-                    game_id, 
-                    run_index, 
-                    agent_class, 
+                    game_id,
+                    run_index,
+                    agent_class,
                     agent_name_cli, # Pass the base name
                     args.max_actions,
                     agent_name_with_variant, # Pass the full name
                     eval_tags,
                     rollout_engine,
+                    prompts_log_dir,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }
@@ -551,8 +641,12 @@ def main():
                 try:
                     result_metrics: GameMetrics = future.result()
                     # Store the object for final stats
-                    game_metrics_objects_list.append(result_metrics) 
-                    
+                    game_metrics_objects_list.append(result_metrics)
+
+                    # Print replay URL immediately after run completes
+                    if result_metrics.replay_url:
+                        print(f"[{game_id} Run {run_index}] Replay: {result_metrics.replay_url}")
+
                     # Convert to dict for JSONL saving
                     metrics_dict = dataclasses.asdict(result_metrics)
                     

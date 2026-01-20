@@ -10,6 +10,10 @@ from .variants.visual_hypothesis_agent import AS66VisualMemoryAgent
 from .variants.meta_coding_harness_agent import MetaCodingHarnessAgent
 from .new_variants.basic_obs_action_agent import BasicObsActionAgent
 from .new_variants.basic_obs_action_agent_rolling_context import BasicObsActionAgentRollingContext
+from .new_variants.basic_obs_action_agent_directed_graph_memory import BasicObsActionAgentDirectedGraphMemory
+from .new_variants.basic_obs_action_agent_graph_memory import BasicObsActionAgentGraphMemory
+from .new_variants.graph_explorer_agent import GraphExplorerAgent
+from .new_variants.graph_explorer_obs_action_agent import GraphExplorerObsActionAgent
 
 # Agent registry for evaluation harness
 AVAILABLE_AGENTS = {
@@ -23,6 +27,10 @@ AVAILABLE_AGENTS = {
     "meta_coding_harness_agent": MetaCodingHarnessAgent,
     "basic_obs_action_agent": BasicObsActionAgent,
     "basic_obs_action_agent_rolling_context": BasicObsActionAgentRollingContext,
+    "basic_obs_action_agent_directed_graph_memory": BasicObsActionAgentDirectedGraphMemory,
+    "basic_obs_action_agent_graph_memory": BasicObsActionAgentGraphMemory,
+    "graph_explorer_agent": GraphExplorerAgent,
+    "graph_explorer_obs_action_agent": GraphExplorerObsActionAgent,
 }
 
 __all__ = [
@@ -36,5 +44,9 @@ __all__ = [
     "MetaCodingHarnessAgent",
     "BasicObsActionAgent",
     "BasicObsActionAgentRollingContext",
+    "BasicObsActionAgentDirectedGraphMemory",
+    "BasicObsActionAgentGraphMemory",
+    "GraphExplorerAgent",
+    "GraphExplorerObsActionAgent",
     "AVAILABLE_AGENTS",
 ]

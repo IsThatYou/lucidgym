@@ -51,6 +51,7 @@ from lucidgym.evaluation.config import EVALUATION_GAMES
 from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
 from lucidgym.metrics.reporting import generate_console_report, save_summary_report, calculate_stats
 from rllm.engine.rollout import OpenAIEngine
+from rllm.engine.rollout.openai_responses_engine import OpenAIResponsesEngine
 from rllm.agents.agent import BaseAgent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -58,7 +59,7 @@ log = logging.getLogger(__name__)
 
 ROOT_URL = os.environ.get("ROOT_URL", "https://three.arcprize.org")
 
-def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> OpenAIEngine:
+def _build_rollout_engine(model_name: str, reasoning_effort: str = "low", use_responses_api: bool = False, verbosity: str = "medium") -> OpenAIEngine | OpenAIResponsesEngine:
     """
     Build a rollout engine mirroring the ARC reference runner defaults.
     """
@@ -106,6 +107,18 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
     supports_reasoning = model_base.startswith("gpt-5") or model_base.startswith("o1") or model_base.startswith("o3")
     if supports_reasoning and reasoning_effort and reasoning_effort != "none":
         sampling_params["reasoning_effort"] = reasoning_effort
+
+    # Use Responses API engine for GPT-5.2+ with reasoning
+    if use_responses_api:
+        log.info(f"OpenAIResponsesEngine config: model={model_name}, reasoning_effort={reasoning_effort}, verbosity={verbosity}")
+        return OpenAIResponsesEngine(
+            model=model_name,
+            max_output_tokens=8192,
+            api_key=api_key,
+            base_url=base_url,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+        )
 
     log.info(f"OpenAIEngine config: model={model_name}, base_url={base_url}, tokenizer={'loaded' if tokenizer else 'None'}, sampling_params={sampling_params}")
 
@@ -608,11 +621,11 @@ def run_evaluation_task(
                 agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
                 agent_kwargs["representation"] = rep_config
 
-            if "basic_obs_action" in agent_name_cli.lower():
+            if "basic_obs_action" in agent_name_cli.lower() or "graph_explorer" in agent_name_cli.lower():
                 agent_kwargs["crop_border"] = args.crop_border
                 agent_kwargs["use_as66_prompts"] = args.use_as66_prompts
                 # Add context_window_size for rolling context variant
-                if "rolling_context" in agent_name_cli.lower():
+                if "rolling_context" in agent_name_cli.lower() or "directed_graph_memory" in agent_name_cli.lower():
                     agent_kwargs["context_window_size"] = args.context_window_size
 
             agent_instance = agent_class(**agent_kwargs)
@@ -687,6 +700,11 @@ def main():
         help="Enable W&B Weave for LLM tracing and evaluation")
     parser.add_argument("--weave-project", dest="weave_project", default="lucidgym-evaluation",
         help="Weave project name in format 'entity/project' (default: lucidgym-evaluation)")
+    parser.add_argument("--use-responses-api", dest="use_responses_api", action="store_true",
+        help="Use OpenAI Responses API instead of Chat Completions (required for GPT-5.2 reasoning)")
+    parser.add_argument("--verbosity", dest="verbosity", default="medium",
+        choices=["low", "medium", "high"],
+        help="Output verbosity for Responses API (default: medium)")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 
@@ -727,7 +745,12 @@ def main():
 
     rollout_model = args.agent_model_override
     rollout_reasoning_effort = args.agent_reasoning_effort
-    rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
+    rollout_engine = _build_rollout_engine(
+        rollout_model,
+        reasoning_effort=rollout_reasoning_effort,
+        use_responses_api=args.use_responses_api,
+        verbosity=args.verbosity,
+    )
     
     # Build comprehensive filename (date first for natural sorting)
     base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"

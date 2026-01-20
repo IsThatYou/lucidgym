@@ -13,9 +13,11 @@ import hashlib
 from openai import OpenAI
 
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
+from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
-from lucidgym.utils.grid_processing import downsample_4x4
+from lucidgym.utils.grid_processing import downsample_4x4, format_grid
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.prompts.memory_prompts import (
     build_initial_hypotheses_system_prompt,
     build_initial_hypotheses_user_prompt,
@@ -30,7 +32,7 @@ from lucidgym.prompts.memory_prompts import (
 log = logging.getLogger(__name__)
 
 
-class AS66MemoryAgent(BaseAgent):
+class AS66MemoryAgent(ArcAgi3Agent):
     """
     Agent using external memory to manage context, including move history and
     dynamic hypotheses about game mechanics. Uses a three-call process:
@@ -48,6 +50,8 @@ class AS66MemoryAgent(BaseAgent):
         downsample: bool = True,
         include_text_diff: bool = True,
         context_length_limit: int = -1,
+        representation: RepresentationConfig | None = None,
+        use_general: bool = False,
     ) -> None:
         """
         Initialize the memory agent.
@@ -60,14 +64,17 @@ class AS66MemoryAgent(BaseAgent):
             downsample: Whether to downsample grids to 16x16
             include_text_diff: Whether to include text diffs in memory
             context_length_limit: Max context tokens (-1 for unlimited)
+            representation: Grid representation configuration
+            use_general: If True, use general learning prompts
         """
-        self.name = name
+        self.representation = representation or RepresentationConfig(downsample=downsample)
+        super().__init__(name=name, downsample=downsample, representation=self.representation)
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.game_id = game_id or f"game_{uuid.uuid4().hex[:8]}"
-        self.downsample = downsample
         self.include_text_diff = include_text_diff
         self.context_length_limit = context_length_limit
+        self.use_general = use_general
 
         self._client = OpenAI()
 
@@ -85,13 +92,14 @@ class AS66MemoryAgent(BaseAgent):
         # Latest tool call ID for chat history
         self._latest_tool_call_id = "call_12345"
 
+        # Pending action for harness interface
+        self._pending_action: dict[str, Any] | None = None
+
         self.reset()
 
     def reset(self) -> None:
         """Reset agent state for new episode."""
-        self._chat_history: list[dict] = []
-        self._trajectory = Trajectory(name=self.name)
-        self._last_observation: dict[str, Any] | None = None
+        super().reset()  # Initialize _steps_this_episode, _chat_history, _trajectory, _last_observation
         self._action_counter: int = 0
 
     @property
@@ -165,6 +173,16 @@ class AS66MemoryAgent(BaseAgent):
         """Generate hash for state deduplication."""
         return hashlib.md5(json.dumps(grid, sort_keys=True).encode()).hexdigest()
 
+    def _format_cell_value(self, val: int) -> str:
+        """Format a single cell value according to the representation config."""
+        from lucidgym.utils.representation import GridFormat
+        if self.representation.format == GridFormat.HEX:
+            return format(val, 'x')
+        elif self.representation.format == GridFormat.SYMBOLIC:
+            return self.representation.symbolic_map.get(val, str(val))
+        else:
+            return str(val)
+
     def _calculate_diff(self, grid1: List[List[int]], grid2: List[List[int]]) -> str:
         """Calculate textual diff between two grids."""
         diffs = []
@@ -176,7 +194,9 @@ class AS66MemoryAgent(BaseAgent):
         for r in range(h):
             for c in range(w):
                 if grid1[r][c] != grid2[r][c]:
-                    diffs.append(f"- Cell ({r}, {c}): {grid1[r][c]} -> {grid2[r][c]}")
+                    val1 = self._format_cell_value(grid1[r][c])
+                    val2 = self._format_cell_value(grid2[r][c])
+                    diffs.append(f"- Cell ({r}, {c}): {val1} -> {val2}")
 
         if not diffs:
             return "No change in board state."
@@ -189,8 +209,12 @@ class AS66MemoryAgent(BaseAgent):
         grid_3d = observation.get("frame", [])
         grid = downsample_4x4(grid_3d, take_last_grid=True, round_to_int=True) if self.downsample else (grid_3d[-1] if grid_3d else [])
 
-        sys_prompt = build_initial_hypotheses_system_prompt()
-        user_prompt = build_initial_hypotheses_user_prompt(grid)
+        # Format grid using representation config
+        from lucidgym.utils.grid_processing import format_grid
+        formatted_grid = format_grid(grid, self.representation)
+
+        sys_prompt = build_initial_hypotheses_system_prompt(representation=self.representation)
+        user_prompt = build_initial_hypotheses_user_prompt(formatted_grid, representation=self.representation)
 
         # Build API call parameters
         api_params = {
@@ -226,6 +250,11 @@ class AS66MemoryAgent(BaseAgent):
         prev_grid = downsample_4x4(prev_grid_3d, take_last_grid=True, round_to_int=True) if self.downsample else (prev_grid_3d[-1] if prev_grid_3d else [])
         new_grid = downsample_4x4(new_grid_3d, take_last_grid=True, round_to_int=True) if self.downsample else (new_grid_3d[-1] if new_grid_3d else [])
 
+        # Skip memory update if either grid is empty (e.g., NOT_PLAYED state)
+        if not prev_grid or not new_grid:
+            log.debug(f"[{self.game_id}] Skipping memory update: empty grid (prev={bool(prev_grid)}, new={bool(new_grid)})")
+            return False
+
         state_hash = self._get_state_hash(prev_grid)
         action_name = action_dict.get("name", "UNKNOWN")
         action_identifier = action_name
@@ -243,17 +272,21 @@ class AS66MemoryAgent(BaseAgent):
         is_level_up = new_score > prev_score
         diff = self._calculate_diff(prev_grid, new_grid)
 
+        # Format grids using representation config for memory storage
+        formatted_prev_grid = format_grid(prev_grid, self.representation)
+        formatted_new_grid = format_grid(new_grid, self.representation)
+
         entry_header = f"### Turn {len(self.seen_state_actions)}\n\n"
 
         entry_parts_list = [
             f"**Action:** `{action_identifier}`\n\n",
             "**State Before:**\n",
             "```\n",
-            f"{prev_grid}\n",
+            f"{formatted_prev_grid}\n",
             "```\n\n",
             "**Resulting State:**\n",
             "```\n",
-            f"{new_grid}\n",
+            f"{formatted_new_grid}\n",
             "```\n"
         ]
 
@@ -316,8 +349,14 @@ class AS66MemoryAgent(BaseAgent):
 
     def _get_observation_text(self, memory_content: str, grid: List[List[int]], score: int, step: int) -> str:
         """Call the LLM to get text-based observation and rationale."""
-        sys_prompt = build_observation_system_prompt()
-        user_prompt = build_observation_user_prompt(memory_content, grid, score, step)
+        # Format grid using representation config
+        from lucidgym.utils.grid_processing import format_grid
+        formatted_grid = format_grid(grid, self.representation)
+
+        sys_prompt = build_observation_system_prompt(representation=self.representation)
+        user_prompt = build_observation_user_prompt(
+            memory_content, formatted_grid, score, step, representation=self.representation
+        )
 
         # Build API call parameters
         api_params = {
@@ -462,25 +501,26 @@ class AS66MemoryAgent(BaseAgent):
         if prev_observation is not None and hasattr(self, '_last_action_dict'):
             self._update_memory_from_action(prev_observation, self._last_action_dict, observation)
 
-    def update_from_model(self, response: str, **_: Any) -> Action:
-        """Convert model response to Action."""
-        if not self._last_observation:
-            return Action(action={"name": "RESET", "data": {}})
-
-        obs = self._last_observation
+    async def call_llm(self, rollout_engine=None) -> dict:
+        """Run the LLM to get action selection. Returns action dict."""
+        obs = self._last_observation or {}
         state = obs.get("state", "NOT_PLAYED")
+
+        # Handle RESET needed states
+        if state in ("NOT_PLAYED", "GAME_OVER"):
+            action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
+            self._pending_action = action_dict
+            return action_dict
 
         # Initialize memory on first observation
         if not self._is_initialized:
             self._initialize_memory(obs)
 
-        # Handle game states
-        if state in ("NOT_PLAYED", "GAME_OVER"):
-            return Action(action={"name": "RESET", "data": {}})
-
         frame_3d = obs.get("frame", [])
         if not frame_3d:
-            return Action(action={"name": "ACTION1", "data": {}})
+            action_dict = {"name": "ACTION1", "data": {}, "obs_text": "No frame data", "action_text": ""}
+            self._pending_action = action_dict
+            return action_dict
 
         grid = downsample_4x4(frame_3d, take_last_grid=True, round_to_int=True) if self.downsample else (frame_3d[-1] if frame_3d else [])
         score = obs.get("score", 0)
@@ -492,15 +532,41 @@ class AS66MemoryAgent(BaseAgent):
         # Select action
         action_dict = self._select_action(observation_text)
 
-        # Attach observation text (which includes hypotheses + reasoning) for ARC API replay logs
-        action_dict["reasoning"] = observation_text
+        # Attach observation text (which includes hypotheses + reasoning)
+        action_dict["obs_text"] = observation_text
+        action_dict["action_text"] = ""
+
+        # Stash for update_from_model to record
+        self._pending_action = action_dict
+        return action_dict
+
+    def update_from_model(self, action_payload: dict | None = None, **_: Any) -> dict:
+        """Convert model response to Action and record the trajectory step."""
+        action_dict = action_payload or self._pending_action
+
+        if action_dict is None:
+            # Fallback to RESET
+            action_dict = {"name": "RESET", "data": {}, "obs_text": "", "action_text": ""}
+
+        obs_text = action_dict.get("obs_text", "")
+        action_text = action_dict.get("action_text", "")
+        response_text = f"Observation: {obs_text}\nAction Text: {action_text}\nAction: {action_dict['name']}"
+
+        if self._trajectory.steps:
+            self._trajectory.steps[-1].model_response = response_text
+            self._trajectory.steps[-1].action = action_dict
 
         # Store for memory update on next observation
         self._last_action_dict = action_dict
 
-        if self._trajectory.steps:
-            self._trajectory.steps[-1].model_response = observation_text + " | " + str(action_dict)
-            self._trajectory.steps[-1].action = action_dict
-
         self._action_counter += 1
-        return Action(action=action_dict)
+        self._pending_action = None
+
+        action = GameAction.from_name(action_dict["name"])
+        action_dict2 = {"action": action, "reasoning": response_text}
+        if action.requires_coordinates():
+            # Safe dict access - action_dict may not have "data" key
+            data = action_dict.get("data", {})
+            action_dict2["x"] = data.get("x", 0)
+            action_dict2["y"] = data.get("y", 0)
+        return action_dict2

@@ -7,10 +7,13 @@ Define evaluation suites by mapping a suite name to a list of game_ids.
 EVALUATION_GAMES = {
     # A small suite for quick debugging and testing
     "debug_suite": [
-        # "ft09-b8377d4b7815",
         "as66-821a4dcad9c2",
     ],
-    # A more comprehensive suite for full evaluations
+    # Single game suite for testing non-as66 games
+    "ls20_suite": [
+        "ls20-fa137e247ce6",
+    ],
+    # Full 6-game evaluation suite
     "standard_suite": [
         "as66-821a4dcad9c2",
         "ls20-fa137e247ce6",

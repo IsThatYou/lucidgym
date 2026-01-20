@@ -30,6 +30,7 @@ load_dotenv(dotenv_path=project_root / ".env", override=True)
 from lucidgym.agents import AVAILABLE_AGENTS
 from lucidgym.environments import ArcAgi3Env
 from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.evaluation.config import EVALUATION_GAMES
 from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
 from lucidgym.metrics.reporting import generate_console_report, save_summary_report, calculate_stats
@@ -64,8 +65,12 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
     sampling_params = {
         "temperature": 1,
         "max_completion_tokens": 8192,
-        "reasoning_effort": reasoning_effort,
     }
+
+    # Only add reasoning_effort for models that support it (gpt-5.x and o-series models)
+    supports_reasoning = model_name.startswith("gpt-5") or model_name.startswith("o1") or model_name.startswith("o3")
+    if supports_reasoning and reasoning_effort and reasoning_effort != "none":
+        sampling_params["reasoning_effort"] = reasoning_effort
 
     return OpenAIEngine(
         model=model_name,
@@ -394,9 +399,30 @@ def run_evaluation_task(
                     agent_kwargs["image_detail_level"] = args.image_detail_level
                     agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-            if "guided" in agent_name_cli.lower() and "16" in agent_name_cli:
-                agent_kwargs["input_mode"] = "text_only"
+            # Build representation config from CLI args (used by multiple agent types)
+            rep_config = RepresentationConfig(
+                format=GridFormat(getattr(args, 'grid_format', 'integers_spaced')),
+                downsample=not getattr(args, 'no_downsample', False),
+            )
+            use_general = getattr(args, 'use_general_prompts', False)
+
+            if "guided" in agent_name_cli.lower():
+                agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["game_id"] = game_id
+                agent_kwargs["representation"] = rep_config
+                agent_kwargs["use_general"] = use_general
+
+            if "memory" in agent_name_cli.lower():
+                # Memory/hypothesis agents also support representation
+                agent_kwargs["representation"] = rep_config
+                agent_kwargs["use_general"] = use_general
+
+            if "meta_coding" in agent_name_cli.lower():
+                agent_kwargs["game_id"] = game_id
+                agent_kwargs["use_64x64"] = getattr(args, 'no_downsample', False)
+                agent_kwargs["use_general_prompts"] = use_general
+                agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
+                agent_kwargs["representation"] = rep_config
 
             agent_instance = agent_class(**agent_kwargs)
         else:
@@ -437,6 +463,17 @@ def main():
     parser.add_argument("--image-detail-level", dest="image_detail_level", default="low", help="Value for IMAGE_DETAIL_LEVEL.")
     parser.add_argument("--image-pixels-per-cell", dest="image_pixels_per_cell", type=int, default=24, help="Value for IMAGE_PIXELS_PER_CELL.")
     parser.add_argument("--arcgame-general-prompts", dest="arcgame_general_prompts", default="0", help="Value for ARCGAME_GENERAL_PROMPTS.")
+    # New representation config arguments
+    parser.add_argument("--grid-format", dest="grid_format", default="integers_spaced",
+        choices=["integers_spaced", "integers_compact", "integers_tuple", "hex", "symbolic", "ascii"],
+        help="Grid representation format (default: integers_spaced for backward compatibility)")
+    parser.add_argument("--input-mode", dest="input_mode", default="text_only",
+        choices=["text_only", "image_only", "text_and_image"],
+        help="Input modality for agents (default: text_only)")
+    parser.add_argument("--no-downsample", dest="no_downsample", action="store_true",
+        help="Use full 64x64 grid instead of 16x16 downsampled")
+    parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
+        help="Use general learning prompts instead of game-specific prompts")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 

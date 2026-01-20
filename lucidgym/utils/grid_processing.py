@@ -10,10 +10,13 @@ Visual mode: you may render PNGs, but do not leak numbers into text prompts.
 """
 
 from __future__ import annotations
-from typing import Iterable, List, Callable
+from typing import Iterable, List, Callable, Dict, Sequence, TYPE_CHECKING
 import io
 import base64
 from PIL import Image, ImageDraw, ImageFont
+
+if TYPE_CHECKING:
+    from lucidgym.utils.representation import RepresentationConfig
 
 
 Number = float | int
@@ -21,7 +24,7 @@ Number = float | int
 
 def frame_to_grid_text(frame: Sequence[Sequence[Sequence[int]]]) -> str:
     """Convert a 2D matrix (array of array of array) into ASCII text."""
-    palette = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+    palette = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
     palette_len = len(palette)
     max_val = 16
     lines: list[str] = []
@@ -221,7 +224,220 @@ def render_grid_to_png_bytes(grid: List[List[int]], cell: int = 22) -> bytes:
 #     """
 #     # Convert list of lists to a numpy array
 #     matrix = np.array(grid_data)
-    
+
+
+def matrix16_to_lines(grid: List[List[int]]) -> str:
+    """
+    Convert a 16x16 (or any size) grid of integers to a text representation.
+
+    Each row is formatted as space-separated integers with row indices.
+
+    Args:
+        grid: 2D list of integers
+
+    Returns:
+        String representation of the grid
+    """
+    if not grid:
+        return "(empty grid)"
+
+    lines = []
+    for row_idx, row in enumerate(grid):
+        row_str = " ".join(f"{int(v):2d}" for v in row)
+        lines.append(f"[{row_idx:2d}] {row_str}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Configurable format functions
+# ---------------------------------------------------------------------------
+
+
+def format_grid(grid: List[List[int]], config: "RepresentationConfig") -> str:
+    """
+    Format a grid according to the representation config.
+
+    Args:
+        grid: 2D list of integers (0-15)
+        config: RepresentationConfig specifying format
+
+    Returns:
+        Formatted string representation of the grid
+    """
+    from lucidgym.utils.representation import GridFormat
+
+    if not grid:
+        return "(empty grid)"
+
+    match config.format:
+        case GridFormat.INTEGERS_SPACED:
+            return format_integers_spaced(grid, include_indices=config.include_row_indices)
+        case GridFormat.INTEGERS_COMPACT:
+            return format_integers_compact(grid)
+        case GridFormat.INTEGERS_TUPLE:
+            return format_integers_tuple(grid)
+        case GridFormat.HEX:
+            return format_hex(grid)
+        case GridFormat.SYMBOLIC:
+            return format_symbolic(grid, config.symbolic_map)
+        case GridFormat.ASCII:
+            return format_ascii(grid)
+        case _:
+            # Fallback to spaced integers
+            return format_integers_spaced(grid, include_indices=True)
+
+
+def format_integers_spaced(grid: List[List[int]], include_indices: bool = True) -> str:
+    """
+    Format grid as space-separated integers with optional row indices.
+
+    This is the current/legacy format for backward compatibility.
+    Token cost: ~745 tokens for 16x16 grid.
+
+    Example output (with indices):
+        [ 0]  1  2  3  4  5 ...
+        [ 1]  1  2  3  4  5 ...
+
+    Example output (without indices):
+         1  2  3  4  5 ...
+         1  2  3  4  5 ...
+    """
+    if not grid:
+        return "(empty grid)"
+
+    lines = []
+    for row_idx, row in enumerate(grid):
+        row_str = " ".join(f"{int(v):2d}" for v in row)
+        if include_indices:
+            lines.append(f"[{row_idx:2d}] {row_str}")
+        else:
+            lines.append(row_str)
+
+    return "\n".join(lines)
+
+
+def format_integers_compact(grid: List[List[int]]) -> str:
+    """
+    Format grid as space-separated integers without row indices.
+
+    More token-efficient than INTEGERS_SPACED.
+    Token cost: ~400 tokens for 16x16 grid.
+
+    Example: "1 15 15 4 0 0 15 15 15 1 1 1 1 1 1 1"
+    """
+    if not grid:
+        return "(empty grid)"
+
+    lines = []
+    for row in grid:
+        row_str = " ".join(str(int(v)) for v in row)
+        lines.append(row_str)
+
+    return "\n".join(lines)
+
+
+def format_integers_tuple(grid: List[List[int]]) -> str:
+    """
+    Format grid as tuple-like rows with parentheses and commas.
+
+    Most verbose/native format but clear structure.
+    Token cost: ~500 tokens for 16x16 grid.
+
+    Example: "(1, 15, 15, 4, 0, 0, 15, 15, 15, 1, 1, 1, 1, 1, 1, 1)"
+    """
+    if not grid:
+        return "(empty grid)"
+
+    lines = []
+    for row in grid:
+        row_str = "(" + ", ".join(str(int(v)) for v in row) + ")"
+        lines.append(row_str)
+
+    return "\n".join(lines)
+
+
+def format_hex(grid: List[List[int]]) -> str:
+    """
+    Format grid as hexadecimal characters (0-9, a-f).
+
+    Most token-efficient format: ~95 tokens for 16x16 grid (87% savings).
+    Each cell is exactly one character.
+
+    Example: "0123456789abcdef"
+    Where: 0-9 = 0-9, a=10, b=11, c=12, d=13, e=14, f=15
+    """
+    if not grid:
+        return "(empty grid)"
+
+    return "\n".join(
+        "".join(format(int(v) & 15, 'x') for v in row)
+        for row in grid
+    )
+
+
+def format_symbolic(grid: List[List[int]], symbol_map: Dict[int, str] | None = None) -> str:
+    """
+    Format grid using symbolic character mapping.
+
+    Uses meaningful characters for semantic clarity:
+    - W = Wall, T = Target, . = Floor, X = Enemy, | = Boundary
+
+    Token cost: ~95 tokens for 16x16 grid (same as hex).
+
+    Args:
+        grid: 2D integer grid
+        symbol_map: Optional custom mapping (int -> char)
+
+    Example: "||||||||||||||||\n|..............|\n|...W...T......|"
+    """
+    if not grid:
+        return "(empty grid)"
+
+    # Default symbolic map if none provided
+    if symbol_map is None:
+        from lucidgym.utils.representation import DEFAULT_SYMBOLIC_MAP
+        symbol_map = DEFAULT_SYMBOLIC_MAP
+
+    return "\n".join(
+        "".join(symbol_map.get(int(v) & 15, "?") for v in row)
+        for row in grid
+    )
+
+
+# ASCII density palette for format_ascii
+ASCII_PALETTE = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`'. "
+
+
+def format_ascii(grid: List[List[int]]) -> str:
+    """
+    Format grid using ASCII density palette characters.
+
+    Maps integer values (0-15) to ASCII characters based on visual density.
+    Token cost: ~95 tokens for 16x16 grid.
+
+    Example: "$@B%8&WM#*oahkbd" for values 0-15
+    """
+    if not grid:
+        return "(empty grid)"
+
+    palette_len = len(ASCII_PALETTE)
+    max_val = 16  # Integer values range 0-15
+
+    lines = []
+    for row in grid:
+        chars = []
+        for v in row:
+            # Map integer (0-15) to palette index, clamping to valid range
+            clamped_v = max(0, min(15, int(v)))  # Clamp to 0-15
+            idx = int((clamped_v / max_val) * (palette_len - 1))
+            idx = min(idx, palette_len - 1)  # Safety clamp for edge cases
+            chars.append(ASCII_PALETTE[idx])
+        lines.append("".join(chars))
+
+    return "\n".join(lines)
+
+
 #     plt.figure(figsize=(8, 8))
 #     # 'tab20' is great for distinct categories (integers)
 #     # 'nearest' keeps the pixels sharp (no blurring)

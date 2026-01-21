@@ -137,7 +137,7 @@ class ArcAgi3Agent(BaseAgent):
         else:
             if isinstance(tool_calls[0], str):
                 name = "RESET"
-                tool_calls = [ChatCompletionMessageFunctionToolCall(id="", function={"name": "RESET", "arguments": "{}"}, type="function")]
+                tool_calls = [ChatCompletionMessageFunctionToolCall(id="call1234", function={"name": "RESET", "arguments": "{}"}, type="function")]
             else:
                 tc = response.tool_calls[0]
                 self._latest_tool_call_id = tc.id
@@ -211,6 +211,7 @@ class ArcAgi3Agent(BaseAgent):
                 # Get raw 2D grid from 3D frame
                 grid_2d = frame[-1] if frame else []
             frame_text = format_grid(grid_2d, self.representation) if grid_2d else "No frame data"
+            print(frame_text)
         elif self.downsample:
             frame = [downsample_4x4(frame)] if frame else []
             if self.grid:

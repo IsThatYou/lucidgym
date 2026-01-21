@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 
 ROOT_URL = os.environ.get("ROOT_URL", "https://three.arcprize.org")
 
+VLLM_URL = os.environ.get("VLLM_URL", None)
+
 def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> OpenAIEngine:
     """
     Build a rollout engine mirroring the ARC reference runner defaults.
@@ -58,6 +60,8 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
         api_key = together_api_key
         base_url = "https://api.together.xyz/v1"
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+    if VLLM_URL:
+        base_url = VLLM_URL
 
     if not api_key:
         raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
@@ -405,16 +409,14 @@ def run_evaluation_task(
                 downsample=not getattr(args, 'no_downsample', False),
             )
             use_general = getattr(args, 'use_general_prompts', False)
-
+            agent_kwargs["representation"] = rep_config
             if "guided" in agent_name_cli.lower():
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["game_id"] = game_id
-                agent_kwargs["representation"] = rep_config
                 agent_kwargs["use_general"] = use_general
 
             if "memory" in agent_name_cli.lower():
                 # Memory/hypothesis agents also support representation
-                agent_kwargs["representation"] = rep_config
                 agent_kwargs["use_general"] = use_general
 
             if "meta_coding" in agent_name_cli.lower():
@@ -422,8 +424,7 @@ def run_evaluation_task(
                 agent_kwargs["use_64x64"] = getattr(args, 'no_downsample', False)
                 agent_kwargs["use_general_prompts"] = use_general
                 agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
-                agent_kwargs["representation"] = rep_config
-
+            
             agent_instance = agent_class(**agent_kwargs)
         else:
             raise ValueError(f"Agent class {agent_class} is not a subclass of BaseAgent.")
@@ -632,6 +633,7 @@ def main():
             log.info(f"Saving summary report to: {results_filepath_txt}")
             try:
                 save_summary_report(
+                    args,
                     str(results_filepath_txt), 
                     game_stats, overall_summary, game_metrics_objects_list, # Pass objects
                     agent_name_with_variant, args.suite, num_runs

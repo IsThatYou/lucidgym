@@ -18,9 +18,9 @@ export PYTHONUNBUFFERED=1
 python -m lucidgym.evaluation.harness \
     --agent basic_obs_action_agent_rolling_context \
     --suite debug_suite \
-    --num_runs 4 \
+    --num_runs 5 \
     --max_actions 300 \
-    --max_workers 4 \
+    --max_workers 5 \
     --agent-model gpt-5-mini \
     --use-as66-prompts \
     --grid-format ascii \

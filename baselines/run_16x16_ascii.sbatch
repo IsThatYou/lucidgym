@@ -22,9 +22,6 @@ python -m lucidgym.evaluation.harness \
     --max_actions 300 \
     --max_workers 4 \
     --agent-model gpt-5-mini \
-     \
-     \
-     \
     --use-as66-prompts \
     --grid-format ascii \
     --input-mode text_only \

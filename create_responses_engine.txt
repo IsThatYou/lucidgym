@@ -1,0 +1,206 @@
+cat > rllm/rllm/engine/rollout/openai_responses_engine.py << 'EOFFILE'
+import asyncio
+import logging
+import os
+
+import openai
+
+from rllm.engine.rollout.rollout_engine import ModelOutput, RolloutEngine
+from rllm.globals import THOUGHT_DELIMITER_END, THOUGHT_DELIMITER_START
+
+
+class OpenAIResponsesEngine(RolloutEngine):
+    """
+    OpenAI Responses API engine for GPT-5.2 and later models.
+
+    Uses the Responses API (/v1/responses) instead of Chat Completions.
+    Supports:
+    - reasoning: {"effort": "none" | "low" | "medium" | "high" | "xhigh"}
+    - text: {"verbosity": "low" | "medium" | "high"}
+    - Chain-of-thought passing via previous_response_id
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5.2",
+        max_output_tokens: int = 8192,
+        api_retries: int = 3,
+        base_url: str = "https://api.openai.com/v1",
+        api_key: str = None,
+        reasoning_effort: str = "medium",
+        verbosity: str = "medium",
+        **kwargs
+    ):
+        self.model = model
+        self.max_output_tokens = max_output_tokens
+        self.api_retries = api_retries
+        self.reasoning_effort = reasoning_effort
+        self.verbosity = verbosity
+
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.client = openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+        # Track previous response for CoT passing
+        self._previous_response_id = None
+
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    def reset_conversation(self):
+        """Reset conversation state (clear previous response ID)."""
+        self._previous_response_id = None
+
+    async def get_model_response(self, messages: list[dict], **kwargs) -> ModelOutput:
+        """
+        Call the Responses API with messages.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            **kwargs: Override reasoning_effort, verbosity, tools, etc.
+        """
+        # Extract parameters
+        reasoning_effort = kwargs.pop("reasoning_effort", self.reasoning_effort)
+        verbosity = kwargs.pop("verbosity", self.verbosity)
+        tools = kwargs.pop("tools", None)
+
+        # Convert messages to input format for Responses API
+        # The Responses API can take messages in a similar format
+        input_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+
+            # Map roles
+            if role == "system":
+                input_messages.append({"role": "developer", "content": content})
+            elif role == "assistant":
+                input_messages.append({"role": "assistant", "content": content})
+            else:
+                input_messages.append({"role": "user", "content": content})
+
+        # Build request params
+        request_params = {
+            "model": self.model,
+            "input": input_messages,
+            "max_output_tokens": self.max_output_tokens,
+        }
+
+        # Add reasoning config
+        if reasoning_effort and reasoning_effort != "none":
+            request_params["reasoning"] = {"effort": reasoning_effort}
+        else:
+            request_params["reasoning"] = {"effort": "none"}
+
+        # Add verbosity config
+        if verbosity:
+            request_params["text"] = {"verbosity": verbosity}
+
+        # Add tools if provided (convert from Chat Completions format to Responses format)
+        if tools:
+            converted_tools = []
+            for tool in tools:
+                if tool.get("type") == "function" and "function" in tool:
+                    # Convert from Chat Completions format:
+                    # {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+                    # To Responses API format:
+                    # {"type": "function", "name": "...", "description": "...", "parameters": {...}}
+                    func = tool["function"]
+                    converted_tools.append({
+                        "type": "function",
+                        "name": func.get("name"),
+                        "description": func.get("description", ""),
+                        "parameters": func.get("parameters", {"type": "object", "properties": {}}),
+                    })
+                else:
+                    # Already in correct format or custom tool
+                    converted_tools.append(tool)
+            request_params["tools"] = converted_tools
+
+        # Note: previous_response_id requires proper tool output handling
+        # Disabled for now - each request is independent
+        # if self._previous_response_id:
+        #     request_params["previous_response_id"] = self._previous_response_id
+
+        retries = self.api_retries
+        while retries > 0:
+            try:
+                response = await self.client.responses.create(**request_params)
+
+                # Store response ID for next turn (disabled - see above)
+                # self._previous_response_id = response.id
+
+                # Extract content from response
+                content = ""
+                reasoning = ""
+                tool_calls = []
+
+                # Parse output items
+                for item in response.output:
+                    if item.type == "message":
+                        for content_item in item.content:
+                            if content_item.type == "output_text":
+                                content = content_item.text
+                    elif item.type == "reasoning":
+                        # Reasoning is returned separately
+                        if hasattr(item, "summary"):
+                            reasoning = item.summary
+                    elif item.type == "function_call":
+                        # Convert Responses API function_call to Chat Completions format
+                        # Responses: {"type": "function_call", "name": "...", "arguments": "...", "call_id": "..."}
+                        # Chat Completions: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
+                        converted_tc = type('ToolCall', (), {
+                            'id': getattr(item, 'call_id', getattr(item, 'id', 'call_0')),
+                            'type': 'function',
+                            'function': type('Function', (), {
+                                'name': getattr(item, 'name', ''),
+                                'arguments': getattr(item, 'arguments', '{}'),
+                            })()
+                        })()
+                        tool_calls.append(converted_tc)
+
+                # Build text with reasoning if available
+                if reasoning:
+                    text = f"{THOUGHT_DELIMITER_START}\n{reasoning}\n{THOUGHT_DELIMITER_END}\n\n{content}"
+                else:
+                    text = content
+
+                # Get usage info
+                prompt_length = response.usage.input_tokens if hasattr(response.usage, "input_tokens") else 0
+                completion_length = response.usage.output_tokens if hasattr(response.usage, "output_tokens") else 0
+
+                return ModelOutput(
+                    text=text,
+                    content=content,
+                    reasoning=reasoning,
+                    tool_calls=tool_calls,
+                    prompt_ids=[],
+                    completion_ids=[],
+                    logprobs=[],
+                    prompt_logprobs=[],
+                    prompt_length=prompt_length,
+                    completion_length=completion_length,
+                    finish_reason="stop",
+                )
+
+            except openai.RateLimitError:
+                retries -= 1
+                if retries == 0:
+                    raise Exception("Rate limit reached and retries exhausted.") from None
+                print("Sleep for 5 seconds for API limit.")
+                await asyncio.sleep(5)
+
+            except Exception as e:
+                retries -= 1
+                if retries == 0:
+                    raise Exception(f"Error processing content after retries: {e}") from e
+                print(f"Error: {e}, retrying...")
+                await asyncio.sleep(1)
+
+    async def chat_completion(self, messages: list[dict], **kwargs) -> ModelOutput:
+        """Alias for get_model_response for compatibility."""
+        return await self.get_model_response(messages, **kwargs)
+
+    async def completion(self, prompt: str, **kwargs) -> ModelOutput:
+        """Convert prompt to message and call get_model_response."""
+        messages = [{"role": "user", "content": prompt}]
+        return await self.get_model_response(messages, **kwargs)
+EOFFILE

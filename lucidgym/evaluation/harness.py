@@ -173,10 +173,27 @@ def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
     if crop_border > 0:
         tags.append(f"crop{crop_border}")
 
-    # Downsample
+    # Grid format (if not default)
+    grid_format = getattr(args, 'grid_format', 'integers_spaced')
+    if grid_format != 'integers_spaced':
+        tags.append(grid_format)
+
+    # Resolution (16x16 vs 64x64)
+    no_downsample = getattr(args, 'no_downsample', False)
+    if no_downsample:
+        tags.append("64x64")
+    else:
+        tags.append("16x16")
+
+    # Input mode (if not default text_only)
+    input_mode = getattr(args, 'input_mode', 'text_only')
+    if input_mode != 'text_only':
+        tags.append(input_mode)
+
+    # Downsample (legacy for visual agents)
     downsample_images = args.downsample_images.lower() == "true"
     if not downsample_images and "as66visualmemoryagent" in agent_name:
-        tags.append("64x64")
+        tags.append("64x64-legacy")
 
     # Image Detail
     image_detail = args.image_detail_level.lower()

@@ -24,7 +24,7 @@ python -m lucidgym.evaluation.harness \
     --agent-model gpt-5-mini \
     --agent-reasoning-effort high \
     --use-responses-api \
-    --crop-border 2 \
+     \
     --use-as66-prompts \
     --input-mode image_only \
     --wandb \

@@ -21,7 +21,7 @@ python -m lucidgym.evaluation.harness \
     --num_runs 4 \
     --max_actions 300 \
     --max_workers 4 \
-    --agent-model gpt-5.2 \
+    --agent-model gpt-5-mini \
     --agent-reasoning-effort high \
     --use-responses-api \
     --crop-border 2 \

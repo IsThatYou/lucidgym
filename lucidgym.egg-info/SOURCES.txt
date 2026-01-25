@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+lucidgym/__init__.py
+lucidgym/registry.py
+lucidgym.egg-info/PKG-INFO
+lucidgym.egg-info/SOURCES.txt
+lucidgym.egg-info/dependency_links.txt
+lucidgym.egg-info/requires.txt
+lucidgym.egg-info/top_level.txt
+lucidgym/agents/__init__.py
+lucidgym/agents/placeholder_agent.py
+lucidgym/agents/textarena_agent.py
+lucidgym/environments/__init__.py
+lucidgym/environments/placeholder_env.py
+lucidgym/environments/textarena_env.py
+lucidgym/workflows/__init__.py
+lucidgym/workflows/placeholder_workflow.py

@@ -8,6 +8,7 @@ import threading
 import json
 import dataclasses
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, List, Callable, Mapping
@@ -180,6 +181,7 @@ def evaluate_single_game(
     wandb_group: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     wandb_tags: Optional[List[str]] = None,
+    prompts_log_path: Optional[Path] = None,
 ) -> GameMetrics:
     """Run a single env-driven game loop without the BaseAgentWrapper."""
 
@@ -281,6 +283,38 @@ def evaluate_single_game(
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
             agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
+
+            # Log prompts/responses to file
+            if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
+                last_step = agent.trajectory.steps[-1]
+                with open(prompts_log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
+                    f.write(f"Score: {arc_score} | Highest Level Reached: {run_metrics.highest_level_reached}\n")
+                    f.write(f"State: {arc_state.name if hasattr(arc_state, 'name') else arc_state}\n")
+                    f.write(f"{'='*80}\n\n")
+
+                    # Log chat completions (prompts and responses)
+                    if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
+                        for msg in last_step.chat_completions:
+                            role = msg.get('role', 'unknown')
+                            content = msg.get('content', '')
+                            tool_calls = msg.get('tool_calls', [])
+
+                            f.write(f"[{role.upper()}]\n")
+                            if content:
+                                f.write(f"{content}\n")
+                            if tool_calls:
+                                f.write("Tool calls:\n")
+                                for tc in tool_calls:
+                                    if isinstance(tc, dict):
+                                        fn = tc.get('function', {})
+                                        f.write(f"  - {fn.get('name', 'unknown')}({fn.get('arguments', '')})\n")
+                                    else:
+                                        f.write(f"  - {tc}\n")
+                            if not content and not tool_calls:
+                                f.write("(empty)\n")
+                            f.write("\n")
 
             # Log metrics to W&B
             if wandb_run:
@@ -404,10 +438,16 @@ def run_evaluation_task(
     wandb_group: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     wandb_tags: Optional[List[str]] = None,
+    prompts_log_dir: Optional[Path] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
     log.debug(f"Task starting: Game {game_id}, Run {run_index}")
+
+    # Create per-game prompts log path
+    prompts_log_path = None
+    if prompts_log_dir:
+        prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
 
     env = ArcAgi3Env(
         game_id=game_id,
@@ -436,21 +476,31 @@ def run_evaluation_task(
                     agent_kwargs["image_detail_level"] = args.image_detail_level
                     agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-            # Build representation config from CLI args (used by multiple agent types)
+            # Build representation config from CLI args (used by some agent types)
             rep_config = RepresentationConfig(
                 format=GridFormat(getattr(args, 'grid_format', 'integers_spaced')),
                 downsample=not getattr(args, 'no_downsample', False),
             )
             use_general = getattr(args, 'use_general_prompts', False)
-            agent_kwargs["representation"] = rep_config
+
+            # Only add representation to agents that support it
+            if "arcagi3_agent" == agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
+
             if "guided" in agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["game_id"] = game_id
                 agent_kwargs["use_general"] = use_general
 
-            if "memory" in agent_name_cli.lower():
-                # Memory/hypothesis agents also support representation
+            if "memory" in agent_name_cli.lower() or "hypothesis" in agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
                 agent_kwargs["use_general"] = use_general
+
+            if "basic_obs_action" in agent_name_cli.lower():
+                agent_kwargs["game_id"] = game_id
+                agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
+                agent_kwargs["downsample"] = not getattr(args, 'no_downsample', False)
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
@@ -475,6 +525,7 @@ def run_evaluation_task(
             wandb_group=wandb_group,
             wandb_config=wandb_config,
             wandb_tags=wandb_tags,
+            prompts_log_path=prompts_log_path,
         )
         log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
         return metrics
@@ -544,10 +595,11 @@ def main():
     # --- Setup Results Files (with new naming convention) ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") 
+    est_tz = ZoneInfo("America/New_York")
+    timestamp = datetime.now(est_tz).strftime("%m%dT%H%M%S")
 
 
-    #  Get all tags for filename AND for passing to threads 
+    #  Get all tags for filename AND for passing to threads
     agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli, args)
     agent_name_with_variant = "-".join(agent_tags)
 
@@ -556,22 +608,31 @@ def main():
     rollout_model = args.agent_model_override
     rollout_reasoning_effort = args.agent_reasoning_effort
     rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
-    
-    # Build comprehensive filename
-    base_filename = f"{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}_{timestamp}"
-    
-    results_filepath_jsonl = results_dir / f"{base_filename}.jsonl"
-    results_filepath_txt = results_dir / f"{base_filename}.summary.txt" 
+
+    # Build comprehensive filename (timestamp first for sorting)
+    base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
+
+    # Create run directory with all outputs inside
+    run_dir = results_dir / base_dirname
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    results_filepath_jsonl = run_dir / "results.jsonl"
+    results_filepath_txt = run_dir / "summary.txt"
+    prompts_log_dir = run_dir / "prompts"
+    prompts_log_dir.mkdir(exist_ok=True)
+
     file_lock = threading.Lock()
-    log.info(f"Detailed results (JSONL): {results_filepath_jsonl}")
-    log.info(f"Summary report (TXT): {results_filepath_txt}")
+    log.info(f"Run directory: {run_dir}")
+    log.info(f"Results (JSONL): {results_filepath_jsonl}")
+    log.info(f"Summary (TXT): {results_filepath_txt}")
+    log.info(f"Prompts: {prompts_log_dir}")
 
     # Setup W&B group if enabled
     wandb_group = None
     wandb_config = None
     wandb_tags = None
     if args.use_wandb:
-        wandb_group = base_filename
+        wandb_group = base_dirname
         wandb_tags = [agent_name_cli, args.suite, args.agent_model_override.split('/')[-1]]
         wandb_config = {
             "agent": agent_name_with_variant,
@@ -614,6 +675,7 @@ def main():
                     wandb_group,
                     wandb_config,
                     wandb_tags,
+                    prompts_log_dir,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }

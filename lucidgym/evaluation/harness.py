@@ -257,6 +257,8 @@ def evaluate_single_game(
             current_level_metrics.attempts.append(current_attempt_metrics)
             return attempt_end_time
 
+        prev_chat_len = 0  # For delta logging
+
         while total_actions_this_run < max_actions_per_game:
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
@@ -284,37 +286,30 @@ def evaluate_single_game(
 
             agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
 
-            # Log prompts/responses to file
+            # Log prompts/responses (delta only)
             if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
                 last_step = agent.trajectory.steps[-1]
                 with open(prompts_log_path, 'a', encoding='utf-8') as f:
                     f.write(f"\n{'='*80}\n")
                     f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
-                    f.write(f"Score: {arc_score} | Highest Level Reached: {run_metrics.highest_level_reached}\n")
-                    f.write(f"State: {arc_state.name if hasattr(arc_state, 'name') else arc_state}\n")
+                    f.write(f"Score: {arc_score} | State: {arc_state.name if hasattr(arc_state, 'name') else arc_state}\n")
                     f.write(f"{'='*80}\n\n")
 
-                    # Log chat completions (prompts and responses)
                     if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
-                        for msg in last_step.chat_completions:
+                        new_messages = last_step.chat_completions[prev_chat_len:]
+                        for msg in new_messages:
                             role = msg.get('role', 'unknown')
                             content = msg.get('content', '')
                             tool_calls = msg.get('tool_calls', [])
-
                             f.write(f"[{role.upper()}]\n")
                             if content:
                                 f.write(f"{content}\n")
                             if tool_calls:
-                                f.write("Tool calls:\n")
                                 for tc in tool_calls:
-                                    if isinstance(tc, dict):
-                                        fn = tc.get('function', {})
-                                        f.write(f"  - {fn.get('name', 'unknown')}({fn.get('arguments', '')})\n")
-                                    else:
-                                        f.write(f"  - {tc}\n")
-                            if not content and not tool_calls:
-                                f.write("(empty)\n")
+                                    fn = tc.get('function', {}) if isinstance(tc, dict) else {}
+                                    f.write(f"Tool: {fn.get('name', tc)}({fn.get('arguments', '')})\n")
                             f.write("\n")
+                        prev_chat_len = len(last_step.chat_completions)
 
             # Log metrics to W&B
             if wandb_run:
@@ -476,7 +471,7 @@ def run_evaluation_task(
                     agent_kwargs["image_detail_level"] = args.image_detail_level
                     agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-            # Build representation config from CLI args (used by some agent types)
+            # Build representation config from CLI args
             rep_config = RepresentationConfig(
                 format=GridFormat(getattr(args, 'grid_format', 'integers_spaced')),
                 downsample=not getattr(args, 'no_downsample', False),
@@ -592,12 +587,11 @@ def main():
         weave.init(args.weave_project)
         log.info(f"Weave initialized for project: {args.weave_project}")
 
-    # --- Setup Results Files (with new naming convention) ---
+    # --- Setup Results Files ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
     est_tz = ZoneInfo("America/New_York")
     timestamp = datetime.now(est_tz).strftime("%m%dT%H%M%S")
-
 
     #  Get all tags for filename AND for passing to threads
     agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli, args)
@@ -609,10 +603,8 @@ def main():
     rollout_reasoning_effort = args.agent_reasoning_effort
     rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
 
-    # Build comprehensive filename (timestamp first for sorting)
+    # Build run directory (timestamp first for sorting)
     base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
-
-    # Create run directory with all outputs inside
     run_dir = results_dir / base_dirname
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -623,9 +615,6 @@ def main():
 
     file_lock = threading.Lock()
     log.info(f"Run directory: {run_dir}")
-    log.info(f"Results (JSONL): {results_filepath_jsonl}")
-    log.info(f"Summary (TXT): {results_filepath_txt}")
-    log.info(f"Prompts: {prompts_log_dir}")
 
     # Setup W&B group if enabled
     wandb_group = None

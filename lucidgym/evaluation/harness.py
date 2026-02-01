@@ -8,6 +8,7 @@ import threading
 import json
 import dataclasses
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, List, Callable, Mapping
@@ -176,9 +177,26 @@ def evaluate_single_game(
     run_index: int,
     tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
+    wandb_project: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_config: Optional[Dict] = None,
+    wandb_tags: Optional[List[str]] = None,
+    prompts_log_path: Optional[Path] = None,
 ) -> GameMetrics:
     """Run a single env-driven game loop without the BaseAgentWrapper."""
 
+    # Initialize individual W&B run for this game
+    wandb_run = None
+    if wandb_project and wandb_group:
+        import wandb
+        wandb_run = wandb.init(
+            project=wandb_project,
+            name=f"{game_id}_run{run_index}",
+            group=wandb_group,
+            config=wandb_config or {},
+            tags=wandb_tags or [],
+            reinit=True,
+        )
 
     run_metrics = GameMetrics(
         game_id=game_id,
@@ -239,6 +257,8 @@ def evaluate_single_game(
             current_level_metrics.attempts.append(current_attempt_metrics)
             return attempt_end_time
 
+        prev_chat_len = 0  # For delta logging
+
         while total_actions_this_run < max_actions_per_game:
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
@@ -265,6 +285,40 @@ def evaluate_single_game(
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
             agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
+
+            # Log prompts/responses (delta only)
+            if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
+                last_step = agent.trajectory.steps[-1]
+                with open(prompts_log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
+                    f.write(f"Score: {arc_score} | State: {arc_state.name if hasattr(arc_state, 'name') else arc_state}\n")
+                    f.write(f"{'='*80}\n\n")
+
+                    if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
+                        new_messages = last_step.chat_completions[prev_chat_len:]
+                        for msg in new_messages:
+                            role = msg.get('role', 'unknown')
+                            content = msg.get('content', '')
+                            tool_calls = msg.get('tool_calls', [])
+                            f.write(f"[{role.upper()}]\n")
+                            if content:
+                                f.write(f"{content}\n")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    fn = tc.get('function', {}) if isinstance(tc, dict) else {}
+                                    f.write(f"Tool: {fn.get('name', tc)}({fn.get('arguments', '')})\n")
+                            f.write("\n")
+                        prev_chat_len = len(last_step.chat_completions)
+
+            # Log metrics to W&B
+            if wandb_run:
+                wandb_run.log({
+                    "action": total_actions_this_run,
+                    "score": arc_score,
+                    "level": current_level_number,
+                    "highest_level_reached": run_metrics.highest_level_reached,
+                })
 
             # --- Handle Level Completion ---
             level_completed = (new_arc_score > previous_arc_score and 
@@ -357,6 +411,10 @@ def evaluate_single_game(
         if rollout_loop is not None:
             rollout_loop.close()
 
+        # Close W&B run for this game
+        if wandb_run:
+            wandb_run.finish()
+
     return run_metrics
 
 
@@ -371,10 +429,20 @@ def run_evaluation_task(
     agent_name_with_variant: str,
     eval_tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
+    wandb_project: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_config: Optional[Dict] = None,
+    wandb_tags: Optional[List[str]] = None,
+    prompts_log_dir: Optional[Path] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
     log.debug(f"Task starting: Game {game_id}, Run {run_index}")
+
+    # Create per-game prompts log path
+    prompts_log_path = None
+    if prompts_log_dir:
+        prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
 
     env = ArcAgi3Env(
         game_id=game_id,
@@ -403,21 +471,31 @@ def run_evaluation_task(
                     agent_kwargs["image_detail_level"] = args.image_detail_level
                     agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-            # Build representation config from CLI args (used by multiple agent types)
+            # Build representation config from CLI args
             rep_config = RepresentationConfig(
                 format=GridFormat(getattr(args, 'grid_format', 'integers_spaced')),
                 downsample=not getattr(args, 'no_downsample', False),
             )
             use_general = getattr(args, 'use_general_prompts', False)
-            agent_kwargs["representation"] = rep_config
+
+            # Only add representation to agents that support it
+            if "arcagi3_agent" == agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
+
             if "guided" in agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["game_id"] = game_id
                 agent_kwargs["use_general"] = use_general
 
-            if "memory" in agent_name_cli.lower():
-                # Memory/hypothesis agents also support representation
+            if "memory" in agent_name_cli.lower() or "hypothesis" in agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
                 agent_kwargs["use_general"] = use_general
+
+            if "basic_obs_action" in agent_name_cli.lower():
+                agent_kwargs["game_id"] = game_id
+                agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
+                agent_kwargs["downsample"] = not getattr(args, 'no_downsample', False)
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
@@ -438,6 +516,11 @@ def run_evaluation_task(
             run_index=run_index,
             tags=eval_tags,
             rollout_engine=rollout_engine,
+            wandb_project=wandb_project,
+            wandb_group=wandb_group,
+            wandb_config=wandb_config,
+            wandb_tags=wandb_tags,
+            prompts_log_path=prompts_log_path,
         )
         log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
         return metrics
@@ -475,6 +558,14 @@ def main():
         help="Use full 64x64 grid instead of 16x16 downsampled")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
+    parser.add_argument("--wandb", dest="use_wandb", action="store_true",
+        help="Enable Weights & Biases logging for metrics tracking")
+    parser.add_argument("--wandb-project", dest="wandb_project", default="lucidgym-evaluation",
+        help="W&B project name (default: lucidgym-evaluation)")
+    parser.add_argument("--weave", dest="use_weave", action="store_true",
+        help="Enable W&B Weave for LLM tracing and evaluation")
+    parser.add_argument("--weave-project", dest="weave_project", default="lucidgym-evaluation",
+        help="Weave project name in format 'entity/project' (default: lucidgym-evaluation)")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 
@@ -485,18 +576,24 @@ def main():
     
     log.info(f"Agent: '{agent_name_cli}', Suite: '{args.suite}', Games: {len(game_ids)}, Runs per game: {num_runs}, Max workers: {max_workers}, Max Actions: {args.max_actions}")
 
-    api_key = os.getenv("ARC_API_KEY", "") 
+    api_key = os.getenv("ARC_API_KEY", "")
     if not api_key:
         log.error("ARC_API_KEY environment variable not found. Please set it in your .env file.")
-        sys.exit(1) 
-    
-    # --- Setup Results Files (with new naming convention) ---
+        sys.exit(1)
+
+    # Initialize Weave for LLM tracing if enabled
+    if args.use_weave:
+        import weave
+        weave.init(args.weave_project)
+        log.info(f"Weave initialized for project: {args.weave_project}")
+
+    # --- Setup Results Files ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") 
+    est_tz = ZoneInfo("America/New_York")
+    timestamp = datetime.now(est_tz).strftime("%m%dT%H%M%S")
 
-
-    #  Get all tags for filename AND for passing to threads 
+    #  Get all tags for filename AND for passing to threads
     agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli, args)
     agent_name_with_variant = "-".join(agent_tags)
 
@@ -505,15 +602,35 @@ def main():
     rollout_model = args.agent_model_override
     rollout_reasoning_effort = args.agent_reasoning_effort
     rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
-    
-    # Build comprehensive filename
-    base_filename = f"{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}_{timestamp}"
-    
-    results_filepath_jsonl = results_dir / f"{base_filename}.jsonl"
-    results_filepath_txt = results_dir / f"{base_filename}.summary.txt" 
+
+    # Build run directory (timestamp first for sorting)
+    base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
+    run_dir = results_dir / base_dirname
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    results_filepath_jsonl = run_dir / "results.jsonl"
+    results_filepath_txt = run_dir / "summary.txt"
+    prompts_log_dir = run_dir / "prompts"
+    prompts_log_dir.mkdir(exist_ok=True)
+
     file_lock = threading.Lock()
-    log.info(f"Detailed results (JSONL): {results_filepath_jsonl}")
-    log.info(f"Summary report (TXT): {results_filepath_txt}")
+    log.info(f"Run directory: {run_dir}")
+
+    # Setup W&B group if enabled
+    wandb_group = None
+    wandb_config = None
+    wandb_tags = None
+    if args.use_wandb:
+        wandb_group = base_dirname
+        wandb_tags = [agent_name_cli, args.suite, args.agent_model_override.split('/')[-1]]
+        wandb_config = {
+            "agent": agent_name_with_variant,
+            "suite": args.suite,
+            "num_runs": num_runs,
+            "max_actions": args.max_actions,
+            "model": args.agent_model_override,
+        }
+        log.info(f"W&B enabled - project: {args.wandb_project}, group: {wandb_group}")
 
     overall_start_time = time.time()
     game_metrics_objects_list: List[GameMetrics] = []
@@ -535,14 +652,19 @@ def main():
                 executor.submit(
                     run_evaluation_task,
                     args,
-                    game_id, 
-                    run_index, 
-                    agent_class, 
-                    agent_name_cli, # Pass the base name
+                    game_id,
+                    run_index,
+                    agent_class,
+                    agent_name_cli,
                     args.max_actions,
-                    agent_name_with_variant, # Pass the full name
+                    agent_name_with_variant,
                     eval_tags,
                     rollout_engine,
+                    args.wandb_project if args.use_wandb else None,
+                    wandb_group,
+                    wandb_config,
+                    wandb_tags,
+                    prompts_log_dir,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }

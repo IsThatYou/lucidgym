@@ -319,8 +319,13 @@ class BasicObsActionAgent(ArcAgi3Agent):
             {"role": "user", "content": user_content}
         ]
 
+        self._chat_history.append({"role": "user", "content": user_msg_text})
+
         model_output = await self.rollout(rollout_engine, messages)
         text = (getattr(model_output, "content", None) or getattr(model_output, "text", "") or "").strip()
+
+        if text:
+            self._chat_history.append({"role": "assistant", "content": text})
         return text
 
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
@@ -348,6 +353,8 @@ class BasicObsActionAgent(ArcAgi3Agent):
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": user_content}
         ]
+
+        self._chat_history.append({"role": "user", "content": user_msg_text})
 
         model_output = await self.rollout(rollout_engine, messages, tools)
 

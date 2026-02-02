@@ -101,6 +101,11 @@ class AS66MemoryAgent(ArcAgi3Agent):
         """Reset agent state for new episode."""
         super().reset()  # Initialize _steps_this_episode, _chat_history, _trajectory, _last_observation
         self._action_counter: int = 0
+        # Store prompts for logging
+        self._last_observation_prompt: str = ""
+        self._last_observation_response: str = ""
+        self._last_action_prompt: str = ""
+        self._last_action_response: str = ""
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
@@ -257,7 +262,14 @@ class AS66MemoryAgent(ArcAgi3Agent):
 
         state_hash = self._get_state_hash(prev_grid)
         action_name = action_dict.get("name", "UNKNOWN")
-        action_identifier = action_name
+        # Include coordinates for ACTION6 to distinguish different click locations
+        if action_name == "ACTION6":
+            data = action_dict.get("data", {})
+            x = data.get("x", 0)
+            y = data.get("y", 0)
+            action_identifier = f"{action_name}({x},{y})"
+        else:
+            action_identifier = action_name
 
         state_action_tuple = (state_hash, action_identifier)
 
@@ -358,6 +370,9 @@ class AS66MemoryAgent(ArcAgi3Agent):
             memory_content, formatted_grid, score, step, representation=self.representation
         )
 
+        # Store prompts for logging
+        self._last_observation_prompt = f"SYSTEM:\n{sys_prompt}\n\nUSER:\n{user_prompt}"
+
         # Build API call parameters
         api_params = {
             "model": self.model,
@@ -372,6 +387,8 @@ class AS66MemoryAgent(ArcAgi3Agent):
         self._token_total += getattr(resp.usage, "total_tokens", 0) or 0
 
         observation = (resp.choices[0].message.content or "No observation generated.").strip()
+        # Store response for logging
+        self._last_observation_response = observation
         log.info(f"[{self.game_id} | Step {step}] Observation Rationale: {observation}")
         return observation
 
@@ -379,6 +396,9 @@ class AS66MemoryAgent(ArcAgi3Agent):
         """Takes observation text and returns action via tool call."""
         sys_prompt = build_action_selection_system_prompt()
         user_prompt = build_action_selection_user_prompt(observation_text)
+
+        # Store prompts for logging
+        self._last_action_prompt = f"SYSTEM:\n{sys_prompt}\n\nUSER:\n{user_prompt}"
 
         tools = self._build_tools()
 
@@ -401,6 +421,7 @@ class AS66MemoryAgent(ArcAgi3Agent):
         tool_calls = resp.choices[0].message.tool_calls
         if not tool_calls:
             log.error("Action selection model failed to call a tool. Defaulting to ACTION1.")
+            self._last_action_response = "No tool call - defaulting to ACTION1"
             return {"name": "ACTION1", "data": {}}
 
         tool_call = tool_calls[0]
@@ -412,6 +433,9 @@ class AS66MemoryAgent(ArcAgi3Agent):
         except json.JSONDecodeError:
             log.error(f"Failed to parse arguments for {action_name}. Defaulting to no arguments.")
             arguments = {}
+
+        # Store response for logging
+        self._last_action_response = f"Tool: {action_name}({tool_call.function.arguments})"
 
         # Add to chat history
         self._chat_history.append({
@@ -469,19 +493,59 @@ class AS66MemoryAgent(ArcAgi3Agent):
                     "parameters": {"type": "object", "properties": {}, "required": []},
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION5",
+                    "description": "Perform a special action or confirm selection",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION6",
+                    "description": "Click on a specific cell at coordinates (row, column)",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x": {
+                                "type": "integer",
+                                "description": "The row coordinate (0-indexed from top)"
+                            },
+                            "y": {
+                                "type": "integer",
+                                "description": "The column coordinate (0-indexed from left)"
+                            }
+                        },
+                        "required": ["x", "y"]
+                    },
+                },
+            },
         ]
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict = None, **_: Any) -> None:
         """Process environment observation and update state."""
         prev_observation = self._last_observation
         self._last_observation = observation
+
+        # Build full prompt/response log for this step
+        full_prompts = []
+        if self._last_observation_prompt:
+            full_prompts.append({"role": "observation_phase", "content": self._last_observation_prompt})
+        if self._last_observation_response:
+            full_prompts.append({"role": "observation_response", "content": self._last_observation_response})
+        if self._last_action_prompt:
+            full_prompts.append({"role": "action_phase", "content": self._last_action_prompt})
+        if self._last_action_response:
+            full_prompts.append({"role": "action_response", "content": self._last_action_response})
 
         step = Step(
             observation=observation,
             reward=reward,
             done=done,
             info=info,
-            chat_completions=self.chat_completions.copy()
+            chat_completions=full_prompts
         )
         self._trajectory.steps.append(step)
 
@@ -564,7 +628,7 @@ class AS66MemoryAgent(ArcAgi3Agent):
 
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
-        if action.requires_coordinates():
+        if action == GameAction.ACTION6:
             # Safe dict access - action_dict may not have "data" key
             data = action_dict.get("data", {})
             action_dict2["x"] = data.get("x", 0)

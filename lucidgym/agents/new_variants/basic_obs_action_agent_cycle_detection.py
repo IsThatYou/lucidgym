@@ -12,7 +12,7 @@ import hashlib
 
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4
 
 try:
@@ -254,7 +254,7 @@ class BasicObsActionAgentCycleDetection(ArcAgi3Agent):
     def trajectory(self) -> Trajectory:
         return self._trajectory
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict = None, **_: Any) -> None:
         # Record transition in cycle detector
         new_grid_text = self._get_grid_text(observation)
         if self._last_grid_text and self._last_executed_action and new_grid_text:

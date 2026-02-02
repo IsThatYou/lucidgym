@@ -225,7 +225,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self._pending_action = None
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
-        if action.requires_coordinates():
+        if action == GameAction.ACTION6:
             action_dict2["x"] = action_dict["data"]["x"]
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2

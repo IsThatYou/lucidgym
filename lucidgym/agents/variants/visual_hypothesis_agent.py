@@ -444,6 +444,10 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
             "text": "\nFollow your reasoning process and provide a detailed text analysis, concluding with your recommended action. Be precise with all coordinates."
         })
 
+        # Store prompts for logging (text representation of multimodal content)
+        user_text_parts = [item.get("text", "[IMAGE]") if item.get("type") == "text" else "[IMAGE]" for item in user_content]
+        self._last_observation_prompt = f"SYSTEM:\n{sys_prompt}\n\nUSER:\n" + "\n".join(user_text_parts)
+
         # Build API call parameters
         api_params = {
             "model": self.model,
@@ -461,6 +465,8 @@ class AS66VisualMemoryAgent(AS66MemoryAgent):
         self._token_total += getattr(resp.usage, "total_tokens", 0) or 0
 
         observation = (resp.choices[0].message.content or "No observation generated.").strip()
+        # Store response for logging
+        self._last_observation_response = observation
         log.info(f"[{self.game_id} | Step {step}] Visual Observation Rationale generated.")
         return observation
 

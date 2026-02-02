@@ -492,13 +492,14 @@ def run_evaluation_task(
                 agent_kwargs["game_id"] = game_id
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["downsample"] = not getattr(args, 'no_downsample', False)
+                agent_kwargs["representation"] = rep_config
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
                 agent_kwargs["use_64x64"] = getattr(args, 'no_downsample', False)
                 agent_kwargs["use_general_prompts"] = use_general
                 agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
-            
+
             agent_instance = agent_class(**agent_kwargs)
         else:
             raise ValueError(f"Agent class {agent_class} is not a subclass of BaseAgent.")

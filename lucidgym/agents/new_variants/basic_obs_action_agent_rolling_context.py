@@ -14,8 +14,9 @@ from lucidgym.utils.openai_client import get_openai_client
 from rllm.agents.agent import Action, BaseAgent,Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
-from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
+from arcengine import GameAction, GameState
+from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes, format_grid
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
 # Optional Weave integration for LLM tracing
 try:
@@ -185,6 +186,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         context_window_size: int = 5,  # Keep last k steps in context
         crop_border: int = 0,  # Remove outer N pixels (e.g., 2 for scoring numbers)
         use_as66_prompts: bool = False,  # Use AS66-specific game rules
+        representation: RepresentationConfig | None = None,  # Grid representation config
     ) -> None:
         """
         Initialize the agent with rolling context.
@@ -200,13 +202,20 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             context_window_size: Number of recent steps to keep in context
             crop_border: Remove outer N pixels from grid (e.g., 2 to remove scoring numbers)
             use_as66_prompts: Use AS66-specific game rules in prompts
+            representation: Grid representation config for formatting
         """
         # Set context_window_size before calling super().__init__ because parent calls reset()
         self.context_window_size = context_window_size
         self.crop_border = crop_border
         self.use_as66_prompts = use_as66_prompts
 
+        # Store representation to set AFTER super().__init__() since parent also sets self.representation
+        _representation = representation or RepresentationConfig(format=GridFormat.ASCII)
+
         super().__init__(system_prompt=system_prompt, name=name)
+
+        # Set representation AFTER super().__init__() to override parent's default
+        self.representation = _representation
         self.input_mode = input_mode
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -261,6 +270,10 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         c = self.crop_border
         return [row[c:-c] for row in grid[c:-c]]
 
+    def _format_grid(self, grid: List[List[int]]) -> str:
+        """Format grid according to representation config."""
+        return format_grid(grid, self.representation)
+
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """Return message history formatted for chat API."""
@@ -274,7 +287,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         """Return the trajectory tracking object."""
         return self._trajectory
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict = None, **_: Any) -> None:
         """Process environment observation and update state."""
         self._last_observation = observation
 
@@ -334,9 +347,9 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         if self.downsample and len(frame_3d) > 0:
             downsampled = downsample_4x4(frame_3d)
             cropped = self._crop_grid(downsampled)
-            grid_str = frame_to_grid_text([cropped])
+            grid_str = self._format_grid(cropped)
         elif len(frame_3d) > 0:
-            grid_str = frame_to_grid_text([frame_3d])
+            grid_str = self._format_grid(frame_3d[-1] if frame_3d else [])
         else:
             grid_str = ""
 
@@ -362,7 +375,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         self._last_executed_action = action_dict["name"]
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
-        if action.requires_coordinates():
+        if action == GameAction.ACTION6:
             action_dict2["x"] = action_dict["data"]["x"]
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2
@@ -386,9 +399,9 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         if self.downsample:
             downsampled = downsample_4x4(frame_3d)
             cropped = self._crop_grid(downsampled)
-            grid = frame_to_grid_text([cropped])
+            grid = self._format_grid(cropped)
         else:
-            grid = frame_to_grid_text([frame_3d])
+            grid = self._format_grid(frame_3d[-1] if frame_3d else [])
         score = obs.get("score", 0)
 
         # Step 1: Observation phase

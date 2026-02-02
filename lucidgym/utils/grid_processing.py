@@ -52,6 +52,16 @@ def _mean(vals: Iterable[Number]) -> float:
     return (sum(vs) / float(len(vs))) if vs else 0.0
 
 
+def _mode(vals: Iterable[Number]) -> float:
+    """Return the most frequent value (mode) from the iterable."""
+    from collections import Counter
+    vs = list(vals)
+    if not vs:
+        return 0.0
+    counter = Counter(vs)
+    return float(counter.most_common(1)[0][0])
+
+
 def downsample_blocks(
     grid: List[List[int]],
     block_h: int = 4,
@@ -83,17 +93,25 @@ def downsample_4x4(
     *,
     take_last_grid: bool = True,
     round_to_int: bool = True,
+    use_mode: bool = True,
 ) -> List[List[int]]:
     """
-    Select one 2D grid from the 3D frame list, then 4×4-average → 16×16.
+    Select one 2D grid from the 3D frame list, then 4×4 downsample → 16×16.
+
+    Args:
+        frame_3d: 3D frame data [channels][rows][cols]
+        take_last_grid: Use last channel (True) or first (False)
+        round_to_int: Round output values to integers
+        use_mode: If True, use mode (most frequent); if False, use mean (average)
     """
     if not frame_3d:
         return []
     grid = frame_3d[-1] if take_last_grid else frame_3d[0]
     if not grid or not grid[0]:
         return []
+    reducer = _mode if use_mode else _mean
     # type: ignore[return-value]
-    return downsample_blocks(grid, 4, 4, _mean, round_to_int=round_to_int)
+    return downsample_blocks(grid, 4, 4, reducer, round_to_int=round_to_int)
 
 
 def generate_numeric_grid_image_bytes(grid: List[List[int]]) -> bytes:

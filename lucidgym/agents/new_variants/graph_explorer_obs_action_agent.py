@@ -25,7 +25,7 @@ from lucidgym.utils.representation import RepresentationConfig
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import downsample_4x4, generate_numeric_grid_image_bytes
 
 # Consonants palette for grid display (tokenizes well, no confusing symbols)
@@ -377,7 +377,7 @@ class GraphExplorerObsActionAgent(ArcAgi3Agent):
         """Return the trajectory tracking object."""
         return self._trajectory
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict = None, **_: Any) -> None:
         """Process environment observation and update graph."""
         self._last_observation = observation
 
@@ -468,7 +468,7 @@ class GraphExplorerObsActionAgent(ArcAgi3Agent):
 
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
-        if action.requires_coordinates():
+        if action == GameAction.ACTION6:
             action_dict2["x"] = action_dict["data"]["x"]
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2

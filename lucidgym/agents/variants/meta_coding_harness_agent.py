@@ -23,7 +23,7 @@ from openai import OpenAI
 
 from rllm.agents.agent import Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
-from lucidgym.environments.arcagi3.structs import GameAction
+from arcengine import GameAction
 from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines, format_grid
 from lucidgym.prompts.meta_prompts import (
     PROMPT_AS66_RULES,

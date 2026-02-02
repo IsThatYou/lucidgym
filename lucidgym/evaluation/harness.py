@@ -30,7 +30,8 @@ load_dotenv(dotenv_path=project_root / ".env", override=True)
 
 from lucidgym.agents import AVAILABLE_AGENTS
 from lucidgym.environments import ArcAgi3Env
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arc_agi import OperationMode
+from arcengine import GameAction, GameState
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.evaluation.config import EVALUATION_GAMES
 from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
@@ -232,18 +233,15 @@ def evaluate_single_game(
             agent.reset()
 
         def _reset_game_state(env, agent, run_metrics, initial_reset=True):
-            observation, info = _run_with_retries(
+            observation = _run_with_retries(
                 env.reset,
                 task={"game_id": game_id, "max_actions": max_actions_per_game, "tags": tags},
             )
 
-            arc_info = info.get("arc", {})
-            arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
-            arc_score = arc_info.get("score", 0) or 0
-            run_metrics.guid = arc_info.get("guid")
-            run_metrics.replay_url = arc_info.get("replay_url")
+            arc_state = GameState[observation.get("state") or "NOT_PLAYED"]
+            arc_score = observation.get("score", 0) or 0
 
-            agent.update_from_env(observation=observation, reward=0.0, done=False, info=info)
+            agent.update_from_env(observation=observation, reward=0.0, done=False)
 
             return arc_state, arc_score
         arc_state, arc_score = _reset_game_state(env, agent, run_metrics)
@@ -263,28 +261,23 @@ def evaluate_single_game(
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
             print(f"[DEBUG]:harness:action_obj={action_obj}")
-            observation, reward, done, info = _run_with_retries(env.step, action_obj)
-            print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}, _episode_guid:{env._episode_guid}")
+            observation, reward, done = _run_with_retries(env.step, action_obj)
+            print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}")
 
             total_actions_this_run += 1
             current_attempt_metrics.actions += 1
 
             previous_arc_state = arc_state
             previous_arc_score = arc_score
-            arc_info = info.get("arc", {})
-            new_arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
-            new_arc_score = arc_info.get("score", 0) or 0
-            run_metrics.guid = run_metrics.guid or arc_info.get("guid")
-            run_metrics.replay_url = run_metrics.replay_url or arc_info.get("replay_url")
+            new_arc_state = GameState[observation.get("state") or "NOT_PLAYED"]
+            new_arc_score = observation.get("score", 0) or 0
 
-            if len(env._episode_frames) >= 2 and env._episode_frames[-2] != env._episode_frames[-1]:
-                current_attempt_metrics.state_changes += 1
             arc_state = new_arc_state
             arc_score = new_arc_score
             max_score = max(max_score, arc_score)
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
-            agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
+            agent.update_from_env(observation=observation, reward=reward, done=done)
 
             # Log prompts/responses (delta only)
             if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
@@ -444,12 +437,15 @@ def run_evaluation_task(
     if prompts_log_dir:
         prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
 
+    # Convert operation_mode string to OperationMode enum
+    operation_mode = OperationMode(getattr(args, 'operation_mode', 'normal'))
+    
     env = ArcAgi3Env(
         game_id=game_id,
-        root_url=ROOT_URL,
-        api_key=os.getenv("ARC_API_KEY", ""),
         max_actions=max_actions,
-        tags=eval_tags,
+        arc_api_key=os.getenv("ARC_API_KEY", ""),
+        arc_base_url=ROOT_URL,
+        operation_mode=operation_mode,
     )
 
     try:
@@ -566,6 +562,9 @@ def main():
         help="Enable W&B Weave for LLM tracing and evaluation")
     parser.add_argument("--weave-project", dest="weave_project", default="lucidgym-evaluation",
         help="Weave project name in format 'entity/project' (default: lucidgym-evaluation)")
+    parser.add_argument("--operation-mode", dest="operation_mode", default="normal",
+        choices=["normal", "online", "offline"],
+        help="ARC environment operation mode: normal (local + API), online (API only), offline (local only)")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 

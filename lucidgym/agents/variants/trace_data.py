@@ -41,7 +41,8 @@ import requests
 
 from openai import OpenAI
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState, FrameData
+from arcengine import GameAction, GameState
+from lucidgym.environments.arcagi3.structs import FrameData
 from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
 from lucidgym.prompts.sft_prompts import build_primer_system_text, build_user_step_text
 

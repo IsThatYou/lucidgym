@@ -15,7 +15,7 @@ from openai import OpenAI
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import downsample_4x4, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.prompts.memory_prompts import (

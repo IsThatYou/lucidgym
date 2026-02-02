@@ -19,7 +19,7 @@ from openai.types.chat import ChatCompletionMessageFunctionToolCall
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from rllm.engine.rollout.rollout_engine import ModelOutput
 
-from lucidgym.environments.arcagi3.structs import GameAction
+from arcengine import GameAction
 from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
@@ -89,7 +89,7 @@ class ArcAgi3Agent(BaseAgent):
         return self._trajectory
 
     # ------------------------------------------------------------------ #
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, **_: Any) -> None:
         # Update internal state
         self._last_observation = observation
 
@@ -104,19 +104,14 @@ class ArcAgi3Agent(BaseAgent):
         if "tool_calls" not in self._chat_history[-1]:
             # no tool calls in the last message, ask llm to do it again.
             self._chat_history.append({"role": "user", "content": "No tool calls found in the response. Please make sure to call a valid tool."})
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
+            step = Step(observation=observation, reward=reward, done=done, info={}, chat_completions=self.chat_completions.copy())
             self._trajectory.steps.append(step)
-        elif "error" not in info.get("arc", {}):
+        else:
             user_msg = self._format_observation(self._last_observation)
             if user_msg:
                 self._chat_history.append({"role": "tool", "tool_call_id": self._latest_tool_call_id, "content": user_msg})
 
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
-            self._trajectory.steps.append(step)
-        else:
-            # no action, no observation, ask llm to do it again.
-            self._chat_history.append({"role": "tool", "tool_call_id": self._latest_tool_call_id, "content": "Unable to parse action response. Make sure your response calls a valid tool call."})
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
+            step = Step(observation=observation, reward=reward, done=done, info={}, chat_completions=self.chat_completions.copy())
             self._trajectory.steps.append(step)
 
 
@@ -137,7 +132,8 @@ class ArcAgi3Agent(BaseAgent):
         else:
             if isinstance(tool_calls[0], str):
                 name = "RESET"
-                tool_calls = [ChatCompletionMessageFunctionToolCall(id="call1234", function={"name": "RESET", "arguments": "{}"}, type="function")]
+                self._latest_tool_call_id = "call_reset_1234"
+                tool_calls = [ChatCompletionMessageFunctionToolCall(id="call_reset_1234", function={"name": "RESET", "arguments": "{}"}, type="function")]
             else:
                 tc = response.tool_calls[0]
                 self._latest_tool_call_id = tc.id
@@ -225,10 +221,7 @@ class ArcAgi3Agent(BaseAgent):
                 frame_text = self.pretty_print_3d(frame)
 
         available_actions = observation.get("available_actions") or []
-        if available_actions:
-            formatted = ", ".join(
-                f"{a['name']}({'xy' if a.get('requires_coordinates') else 'ok'})" for a in available_actions
-            )
+
         return textwrap.dedent(
             """
             # State:

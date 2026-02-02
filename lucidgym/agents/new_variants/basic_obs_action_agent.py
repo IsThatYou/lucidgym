@@ -9,10 +9,10 @@ import logging
 import base64
 from openai import OpenAI
 
-from rllm.agents.agent import Action, BaseAgent,Step, Trajectory
+from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
 
 
@@ -176,7 +176,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         """Return the trajectory tracking object."""
         return self._trajectory
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, **_: Any) -> None:
         """Process environment observation and update state."""
         self._last_observation = observation
 
@@ -185,7 +185,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
             observation=observation,
             reward=reward,
             done=done,
-            info=info,
+            info={},
             chat_completions=self.chat_completions.copy()
         )
         self._trajectory.steps.append(step)

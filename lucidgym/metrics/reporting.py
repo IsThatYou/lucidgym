@@ -229,6 +229,7 @@ def generate_console_report(results_data: List[GameMetrics], suite_name: str, ag
 
 #  Summary Text File Function 
 def save_summary_report(
+    args,
     filepath: str, 
     game_stats: Dict[str, Dict[str, Any]], 
     overall_summary: Dict[str, Any], 
@@ -246,6 +247,7 @@ def save_summary_report(
     report_lines.append(f"Suite: {suite_name}")
     report_lines.append(f"Requested Runs per Game: {num_runs_per_game}")
     report_lines.append(f"Generated At: {datetime.now().isoformat()}")
+    report_lines.append(f"Representation Format: {args.grid_format}; Downsampled: {not args.no_downsample}; Input Mode: {args.input_mode}")
     report_lines.append("---------------------------------")
 
     # Overall Summary

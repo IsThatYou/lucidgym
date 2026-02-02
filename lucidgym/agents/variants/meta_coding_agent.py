@@ -27,7 +27,7 @@ if str(project_root) not in sys.path:
 load_dotenv(dotenv_path=project_root / ".env.example")
 load_dotenv(dotenv_path=project_root / ".env", override=True)
 
-from lucidgym.environments.arcagi3.structs import GameAction
+from arcengine import GameAction
 from lucidgym.utils.grid_processing import downsample_4x4, matrix16_to_lines
 from lucidgym.prompts.meta_prompts import (
     PROMPT_AS66_RULES,

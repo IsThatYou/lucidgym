@@ -12,7 +12,7 @@ from openai import OpenAI
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, generate_numeric_grid_image_bytes
 from lucidgym.prompts.text_prompts import (
     build_observation_system_text,
@@ -365,8 +365,12 @@ class AS66GuidedAgent64(ArcAgi3Agent):
 
         # Handle ACTION6 coordinates - no scaling needed for 64x64
         if name == "ACTION6":
-            x_64 = args.get("x", 0)
-            y_64 = args.get("y", 0)
+            # Ensure coordinates are integers (JSON may return strings)
+            x_64 = int(args.get("x", 0))
+            y_64 = int(args.get("y", 0))
+            # Clamp to valid 64x64 range
+            x_64 = max(0, min(63, x_64))
+            y_64 = max(0, min(63, y_64))
             return {"name": name, "data": {"x": x_64, "y": y_64}, "action_text": model_output.content}
 
         return {"name": name, "data": args, "action_text": model_output.content}

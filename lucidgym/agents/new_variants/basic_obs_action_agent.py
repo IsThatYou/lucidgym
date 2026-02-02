@@ -9,82 +9,29 @@ import logging
 import base64
 from openai import OpenAI
 
-from lucidgym.utils.openai_client import get_openai_client
-from rllm.agents.agent import Action, BaseAgent,Step, Trajectory
+from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
 
-# Optional Weave integration for LLM tracing
-try:
-    import weave
-    WEAVE_AVAILABLE = True
-except ImportError:
-    WEAVE_AVAILABLE = False
-    weave = None
 
 log = logging.getLogger(__name__)
 
-# Conditional weave decorator
-def weave_op(func):
-    """Apply @weave.op decorator if weave is available, otherwise no-op."""
-    if WEAVE_AVAILABLE and weave:
-        return weave.op(func)
-    return func
 
+def build_observation_system_text():
+    return (
+        "You are observing a 16x16 grid representation of a game state. "
+        "Each cell contains an ASCII character representing different game elements. "
+        "Your task is to analyze this grid and determine the best action to take. "
+        "The grid shows the current game state with various symbols representing different game objects."
+    )
 
-def build_observation_system_text(use_as66_prompts: bool = False):
-    if use_as66_prompts:
-        # AS66-specific rules (generic, no hardcoded integer values)
-        return (
-            "You are playing a game represented by a 16×16 grid.\n"
-            "Your task is to observe the position and analyze potential moves.\n\n"
-            "Movement model:\n"
-            "- There is one main movable piece. It may be a unique integer or small block.\n"
-            "- When you choose a direction (Up, Down, Left, Right), the piece slides until blocked.\n"
-            "- Sliding can wrap across board edges if unobstructed.\n"
-            "- If no obstacles in a direction, the piece returns to start (no movement).\n\n"
-            "Obstacles and structures:\n"
-            "- Walls block movement (you stop adjacent to them).\n"
-            "- Target region forms a U-shape (2x3 with center removed). Fill it to win.\n"
-            "- Background cells are the playable area.\n"
-            "- Boundaries delimit the play field.\n"
-            "- Some levels have enemies (large blocks) - collision means game over.\n\n"
-            "For observation, analyze:\n"
-            "1. Locate the movable piece(s) and key structures\n"
-            "2. For each direction, simulate where the piece would land\n"
-            "3. Consider enemy movement if present\n"
-            "4. Determine which direction best progresses toward the goal\n\n"
-            "DO NOT call an action tool here - only provide analysis.\n"
-            "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
-        )
-    else:
-        # Generic prompts
-        return (
-            "You are observing a 16x16 grid representation of a game state. "
-            "Each cell contains an ASCII character representing different game elements. "
-            "Your task is to analyze this grid and determine the best action to take. "
-            "The grid shows the current game state with various symbols representing different game objects."
-        )
-
-def build_action_system_text(use_as66_prompts: bool = False):
-    if use_as66_prompts:
-        # AS66-specific action prompt
-        return (
-            "Select exactly one move by calling a single tool. Do not include prose.\n"
-            "Available tools:\n"
-            "- ACTION1 = Up\n"
-            "- ACTION2 = Down\n"
-            "- ACTION3 = Left\n"
-            "- ACTION4 = Right"
-        )
-    else:
-        # Generic action prompt
-        return (
-            "You are selecting the best action based on your observation of the game state. "
-            "Choose one of the available actions: ACTION1 (Up), ACTION2 (Down), ACTION3 (Left), ACTION4 (Right), ACTION5 (Enter), ACTION6 (Click)"
-        )
+def build_action_system_text():
+    return (
+        "You are selecting the best action based on your observation of the game state. "
+        "Choose one of the available actions: ACTION1 (Up), ACTION2 (Down), ACTION3 (Left), ACTION4 (Right), ACTION5 (Enter), ACTION6 (Click)"
+    )
 
 def _coerce_int(v: Any, default: int = 0) -> int:
     try:
@@ -178,8 +125,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
         reasoning_effort: str = "low",
         downsample = True,
         game_id: str | None = None,
-        crop_border: int = 0,  # Remove outer N pixels (e.g., 2 for scoring numbers)
-        use_as66_prompts: bool = False,  # Use AS66-specific game rules
     ) -> None:
         """
         Initialize the agent.
@@ -191,8 +136,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
             model: OpenAI model to use
             reasoning_effort: Reasoning effort level
             game_id: Game ID for prompt selection
-            crop_border: Remove outer N pixels from grid (e.g., 2 to remove scoring numbers)
-            use_as66_prompts: Use AS66-specific game rules in prompts
         """
         super().__init__(system_prompt=system_prompt, name=name)
         self.input_mode = input_mode
@@ -201,14 +144,12 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self.game_id = game_id
         self._system_prompt_override = system_prompt
         self.downsample = downsample
-        self.crop_border = crop_border
-        self.use_as66_prompts = use_as66_prompts
 
         if self.input_mode not in ["text_only", "image_only", "text_and_image"]:
             log.warning(f"Invalid input_mode '{self.input_mode}', defaulting to 'text_only'.")
             self.input_mode = "text_only"
 
-        self._client = get_openai_client(model=model)
+        self._client = OpenAI()
         self._latest_tool_call_id = "call_12345"
         self.reset()
 
@@ -221,13 +162,11 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self._token_total: int = 0
         self._action_counter: int = 0
         self._pending_action: dict[str, Any] | None = None
-        # Track last executed action to prevent double RESETs
-        self._last_executed_action: str | None = None
 
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """Return message history formatted for chat API."""
-        system_msg = self._system_prompt_override or build_observation_system_text(self.use_as66_prompts)
+        system_msg = self._system_prompt_override or build_observation_system_text()
         messages: list[dict] = [{"role": "system", "content": system_msg}]
         messages.extend(self._chat_history)
         return messages
@@ -237,7 +176,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         """Return the trajectory tracking object."""
         return self._trajectory
 
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, **_: Any) -> None:
         """Process environment observation and update state."""
         self._last_observation = observation
 
@@ -246,7 +185,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
             observation=observation,
             reward=reward,
             done=done,
-            info=info,
+            info={},
             chat_completions=self.chat_completions.copy()
         )
         self._trajectory.steps.append(step)
@@ -284,8 +223,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         self._action_counter += 1
         self._pending_action = None
-        # Track last executed action to prevent double RESETs
-        self._last_executed_action = action_dict["name"]
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
         if action.requires_coordinates():
@@ -293,17 +230,14 @@ class BasicObsActionAgent(ArcAgi3Agent):
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2
 
-    @weave_op
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
         obs = self._last_observation or {}
         state = obs.get("state", "NOT_PLAYED")
 
         # Handle RESET needed states
-        # Only auto-RESET if state requires it AND we didn't just execute RESET
-        # This prevents double RESETs that cause score to drop
         # print(f"[DEBUG]:[guided]: obs={obs}")
-        if state in ("NOT_PLAYED", "GAME_OVER") and self._last_executed_action != "RESET":
+        if state in ("NOT_PLAYED", "GAME_OVER"):
             action_dict = {"name": "RESET", "data": {}, "obs_text": "Game Over, starting new game.", "action_text": ""}
             self._pending_action = action_dict
             return action_dict
@@ -356,7 +290,6 @@ class BasicObsActionAgent(ArcAgi3Agent):
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
 
-    @weave_op
     async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
         """Call the model for observation/reasoning phase."""
         sys_msg = build_observation_system_text()
@@ -386,14 +319,18 @@ class BasicObsActionAgent(ArcAgi3Agent):
             {"role": "user", "content": user_content}
         ]
 
+        self._chat_history.append({"role": "user", "content": user_msg_text})
+
         model_output = await self.rollout(rollout_engine, messages)
         text = (getattr(model_output, "content", None) or getattr(model_output, "text", "") or "").strip()
+
+        if text:
+            self._chat_history.append({"role": "assistant", "content": text})
         return text
 
-    @weave_op
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
-        sys_msg = build_action_system_text(self.use_as66_prompts)
+        sys_msg = build_action_system_text()
 
         include_text = self.input_mode in ["text_only", "text_and_image"]
         format_clarification = ""
@@ -416,6 +353,8 @@ class BasicObsActionAgent(ArcAgi3Agent):
             {"role": "system", "content": sys_msg},
             {"role": "user", "content": user_content}
         ]
+
+        self._chat_history.append({"role": "user", "content": user_msg_text})
 
         model_output = await self.rollout(rollout_engine, messages, tools)
 
@@ -454,15 +393,20 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         # Handle ACTION6 coordinate mapping if needed
         if name == "ACTION6":
-            x_raw = args.get("x", 0)
-            y_raw = args.get("y", 0)
+            # Ensure coordinates are integers (JSON may return strings)
+            x_raw = _coerce_int(args.get("x", 0))
+            y_raw = _coerce_int(args.get("y", 0))
             # Scale coordinates to 64x64 game space only if using downsampled 16x16 grid
             if self.downsample:
+                # Clamp to valid 16x16 range before scaling
+                x_raw = max(0, min(15, x_raw))
+                y_raw = max(0, min(15, y_raw))
                 x_64 = x_raw * 4
                 y_64 = y_raw * 4
             else:
-                x_64 = x_raw
-                y_64 = y_raw
+                # Clamp to valid 64x64 range
+                x_64 = max(0, min(63, x_raw))
+                y_64 = max(0, min(63, y_raw))
             return {"name": name, "data": {"x": x_64, "y": y_64}, "action_text": model_output.content}
 
         return {"name": name, "data": args, "action_text": model_output.content}

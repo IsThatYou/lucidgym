@@ -19,7 +19,7 @@ from openai.types.chat import ChatCompletionMessageFunctionToolCall
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from rllm.engine.rollout.rollout_engine import ModelOutput
 
-from lucidgym.environments.arcagi3.structs import GameAction
+from arcengine import GameAction
 from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
@@ -89,7 +89,7 @@ class ArcAgi3Agent(BaseAgent):
         return self._trajectory
 
     # ------------------------------------------------------------------ #
-    def update_from_env(self, observation: Any, reward: float, done: bool, info: dict, **_: Any) -> None:
+    def update_from_env(self, observation: Any, reward: float, done: bool, **_: Any) -> None:
         # Update internal state
         self._last_observation = observation
 
@@ -104,25 +104,20 @@ class ArcAgi3Agent(BaseAgent):
         if "tool_calls" not in self._chat_history[-1]:
             # no tool calls in the last message, ask llm to do it again.
             self._chat_history.append({"role": "user", "content": "No tool calls found in the response. Please make sure to call a valid tool."})
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
+            step = Step(observation=observation, reward=reward, done=done, info={}, chat_completions=self.chat_completions.copy())
             self._trajectory.steps.append(step)
-        elif "error" not in info.get("arc", {}):
+        else:
             user_msg = self._format_observation(self._last_observation)
             if user_msg:
                 self._chat_history.append({"role": "tool", "tool_call_id": self._latest_tool_call_id, "content": user_msg})
 
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
-            self._trajectory.steps.append(step)
-        else:
-            # no action, no observation, ask llm to do it again.
-            self._chat_history.append({"role": "tool", "tool_call_id": self._latest_tool_call_id, "content": "Unable to parse action response. Make sure your response calls a valid tool call."})
-            step = Step(observation=observation, reward=reward, done=done, info=info, chat_completions=self.chat_completions.copy())
+            step = Step(observation=observation, reward=reward, done=done, info={}, chat_completions=self.chat_completions.copy())
             self._trajectory.steps.append(step)
 
 
     def update_from_model(self, response: dict | ModelOutput) -> dict:
-        # Handle RESET needed states
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        # Handle RESET needed states (with null safety)
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
         if state in ("NOT_PLAYED", "GAME_OVER"):
             response = ModelOutput(text="Game Over, starting new game.", content="", reasoning="", tool_calls=["RESET"])
         action_payload = {}
@@ -137,7 +132,8 @@ class ArcAgi3Agent(BaseAgent):
         else:
             if isinstance(tool_calls[0], str):
                 name = "RESET"
-                tool_calls = [ChatCompletionMessageFunctionToolCall(id="", function={"name": "RESET", "arguments": "{}"}, type="function")]
+                self._latest_tool_call_id = "call_reset_1234"
+                tool_calls = [ChatCompletionMessageFunctionToolCall(id="call_reset_1234", function={"name": "RESET", "arguments": "{}"}, type="function")]
             else:
                 tc = response.tool_calls[0]
                 self._latest_tool_call_id = tc.id
@@ -146,8 +142,18 @@ class ArcAgi3Agent(BaseAgent):
                 args = json.loads(arguments or "{}")
                 
                 if name == "ACTION6":
-                    x_pos = int(args.get("x", 0)) * 4 if self.downsample else int(args.get("x", 0))
-                    y_pos = int(args.get("y", 0)) * 4 if self.downsample else int(args.get("y", 0))
+                    x_raw = int(args.get("x", 0))
+                    y_raw = int(args.get("y", 0))
+                    if self.downsample:
+                        # Clamp to 16x16 range before scaling
+                        x_raw = max(0, min(15, x_raw))
+                        y_raw = max(0, min(15, y_raw))
+                        x_pos = x_raw * 4
+                        y_pos = y_raw * 4
+                    else:
+                        # Clamp to 64x64 range
+                        x_pos = max(0, min(63, x_raw))
+                        y_pos = max(0, min(63, y_raw))
                     action_payload["x"] = x_pos
                     action_payload["y"] = y_pos
         action = GameAction.from_name(name)
@@ -173,7 +179,7 @@ class ArcAgi3Agent(BaseAgent):
     # ------------------------------------------------------------------ #
     async def call_llm(self, rollout_engine=None) -> tuple[str, dict]:
         """Run the two-phase observation/action LLM calls and return text + action dict."""
-        state = self._last_observation.get("state", "NOT_PLAYED")
+        state = self._last_observation.get("state", "NOT_PLAYED") if self._last_observation else "NOT_PLAYED"
 
         # Handle RESET needed states
         # print(f"[DEBUG]:[guided]: obs={obs}")
@@ -201,6 +207,7 @@ class ArcAgi3Agent(BaseAgent):
                 # Get raw 2D grid from 3D frame
                 grid_2d = frame[-1] if frame else []
             frame_text = format_grid(grid_2d, self.representation) if grid_2d else "No frame data"
+            print(frame_text)
         elif self.downsample:
             frame = [downsample_4x4(frame)] if frame else []
             if self.grid:
@@ -214,10 +221,7 @@ class ArcAgi3Agent(BaseAgent):
                 frame_text = self.pretty_print_3d(frame)
 
         available_actions = observation.get("available_actions") or []
-        if available_actions:
-            formatted = ", ".join(
-                f"{a['name']}({'xy' if a.get('requires_coordinates') else 'ok'})" for a in available_actions
-            )
+
         return textwrap.dedent(
             """
             # State:

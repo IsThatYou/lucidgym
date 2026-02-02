@@ -7,7 +7,8 @@ import time
 import threading
 import json
 import dataclasses
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional, Type, List, Callable, Mapping
@@ -17,22 +18,6 @@ import requests
 import openai
 from dotenv import load_dotenv
 from transformers import AutoTokenizer
-
-# Optional W&B integration
-try:
-    import wandb
-    WANDB_AVAILABLE = True
-except ImportError:
-    WANDB_AVAILABLE = False
-    wandb = None
-
-# Optional Weave integration for LLM tracing
-try:
-    import weave
-    WEAVE_AVAILABLE = True
-except ImportError:
-    WEAVE_AVAILABLE = False
-    weave = None
 
 # Add project root to sys.path
 project_root = Path(__file__).resolve().parents[2]
@@ -45,13 +30,13 @@ load_dotenv(dotenv_path=project_root / ".env", override=True)
 
 from lucidgym.agents import AVAILABLE_AGENTS
 from lucidgym.environments import ArcAgi3Env
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arc_agi import OperationMode
+from arcengine import GameAction, GameState
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.evaluation.config import EVALUATION_GAMES
 from lucidgym.metrics.structures import GameMetrics, LevelMetrics, AttemptMetrics
 from lucidgym.metrics.reporting import generate_console_report, save_summary_report, calculate_stats
 from rllm.engine.rollout import OpenAIEngine
-from rllm.engine.rollout.openai_responses_engine import OpenAIResponsesEngine
 from rllm.agents.agent import BaseAgent
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -59,44 +44,29 @@ log = logging.getLogger(__name__)
 
 ROOT_URL = os.environ.get("ROOT_URL", "https://three.arcprize.org")
 
-def _build_rollout_engine(model_name: str, reasoning_effort: str = "low", use_responses_api: bool = False, verbosity: str = "medium") -> OpenAIEngine | OpenAIResponsesEngine:
+VLLM_URL = os.environ.get("VLLM_URL", None)
+
+def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> OpenAIEngine:
     """
     Build a rollout engine mirroring the ARC reference runner defaults.
     """
     together_api_key = os.getenv("TOGETHER_API_KEY", "").strip()
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
-
-    # If model has a provider prefix (contains "/"), force OpenRouter
-    has_provider_prefix = "/" in model_name
 
     tokenizer = None
-    if has_provider_prefix:
-        # Use OpenRouter for provider-prefixed models
-        api_key = openrouter_api_key
-        base_url = "https://openrouter.ai/api/v1"
-    else:
-        # Default priority: OPENAI_API_KEY > OPENROUTER_API_KEY
-        api_key = openai_api_key or openrouter_api_key
-        base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not openai_api_key else "https://api.openai.com/v1"
+    api_key = openai_api_key
+    base_url = "https://api.openai.com/v1"
 
-    # Use Together/Qwen tokenizer when the model is not an OpenAI model
-    # Check both "gpt-" and "openai/gpt-" formats, as well as o1/o3 models
-    model_base = model_name.split("/")[-1]  # Get model name after provider prefix
-    is_openai_model = model_base.startswith("gpt-") or model_base.startswith("o1-") or model_base.startswith("o3-")
-
-    if not is_openai_model:
-        if has_provider_prefix:
-            # Already using OpenRouter, don't load tokenizer
-            pass
-        else:
-            # Non-OpenAI model without prefix, use Together or OpenRouter with tokenizer
-            api_key = together_api_key or openrouter_api_key
-            base_url = "https://openrouter.ai/api/v1" if openrouter_api_key and not together_api_key else "https://api.together.xyz/v1"
-            tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+    # Use Together/Qwen tokenizer when the model is not an OpenAI-prefixed model.
+    if not model_name.startswith("gpt-"):
+        api_key = together_api_key
+        base_url = "https://api.together.xyz/v1"
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+    if VLLM_URL:
+        base_url = VLLM_URL
 
     if not api_key:
-        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY, TOGETHER_API_KEY, or OPENROUTER_API_KEY.")
+        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
 
     sampling_params = {
         "temperature": 1,
@@ -104,23 +74,9 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low", use_re
     }
 
     # Only add reasoning_effort for models that support it (gpt-5.x and o-series models)
-    supports_reasoning = model_base.startswith("gpt-5") or model_base.startswith("o1") or model_base.startswith("o3")
+    supports_reasoning = model_name.startswith("gpt-5") or model_name.startswith("o1") or model_name.startswith("o3")
     if supports_reasoning and reasoning_effort and reasoning_effort != "none":
         sampling_params["reasoning_effort"] = reasoning_effort
-
-    # Use Responses API engine for GPT-5.2+ with reasoning
-    if use_responses_api:
-        log.info(f"OpenAIResponsesEngine config: model={model_name}, reasoning_effort={reasoning_effort}, verbosity={verbosity}")
-        return OpenAIResponsesEngine(
-            model=model_name,
-            max_output_tokens=8192,
-            api_key=api_key,
-            base_url=base_url,
-            reasoning_effort=reasoning_effort,
-            verbosity=verbosity,
-        )
-
-    log.info(f"OpenAIEngine config: model={model_name}, base_url={base_url}, tokenizer={'loaded' if tokenizer else 'None'}, sampling_params={sampling_params}")
 
     return OpenAIEngine(
         model=model_name,
@@ -168,32 +124,10 @@ def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
     if context_limit != -1:
         tags.append(f"ctx{context_limit // 1000}k")
 
-    # Crop Border
-    crop_border = args.crop_border
-    if crop_border > 0:
-        tags.append(f"crop{crop_border}")
-
-    # Grid format (if not default)
-    grid_format = getattr(args, 'grid_format', 'integers_spaced')
-    if grid_format != 'integers_spaced':
-        tags.append(grid_format)
-
-    # Resolution (16x16 vs 64x64)
-    no_downsample = getattr(args, 'no_downsample', False)
-    if no_downsample:
-        tags.append("64x64")
-    else:
-        tags.append("16x16")
-
-    # Input mode (if not default text_only)
-    input_mode = getattr(args, 'input_mode', 'text_only')
-    if input_mode != 'text_only':
-        tags.append(input_mode)
-
-    # Downsample (legacy for visual agents)
+    # Downsample
     downsample_images = args.downsample_images.lower() == "true"
     if not downsample_images and "as66visualmemoryagent" in agent_name:
-        tags.append("64x64-legacy")
+        tags.append("64x64")
 
     # Image Detail
     image_detail = args.image_detail_level.lower()
@@ -244,32 +178,26 @@ def evaluate_single_game(
     run_index: int,
     tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
-    prompts_log_path: Optional[Path] = None,
     wandb_project: Optional[str] = None,
     wandb_group: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     wandb_tags: Optional[List[str]] = None,
-    # wandb_lock: Optional[threading.Lock] = None,
+    prompts_log_path: Optional[Path] = None,
 ) -> GameMetrics:
     """Run a single env-driven game loop without the BaseAgentWrapper."""
 
     # Initialize individual W&B run for this game
     wandb_run = None
-    if wandb_project and wandb_group and WANDB_AVAILABLE:
-        run_name = f"{game_id}_run{run_index}"
+    if wandb_project and wandb_group:
+        import wandb
         wandb_run = wandb.init(
             project=wandb_project,
-            name=run_name,
+            name=f"{game_id}_run{run_index}",
             group=wandb_group,
-            job_type="game_eval",
             config=wandb_config or {},
             tags=wandb_tags or [],
-            reinit=True,  # Allow multiple init calls in same process
+            reinit=True,
         )
-        # Define action as the x-axis for metrics to avoid step conflicts
-        if wandb_run:
-            wandb_run.define_metric("action")
-            wandb_run.define_metric("*", step_metric="action")
 
     run_metrics = GameMetrics(
         game_id=game_id,
@@ -290,10 +218,6 @@ def evaluate_single_game(
     arc_state: Optional[GameState] = None
     arc_score = 0
 
-    # Track state-action pairs to detect duplicates
-    seen_state_action_pairs = set()
-    duplicate_action_count = 0
-
     agent_tools: List[dict[str, Any]] = []
     supports_accumulated_reasoning = bool(rollout_engine and getattr(rollout_engine, "tokenizer", None))
     rollout_loop = asyncio.new_event_loop() if rollout_engine is not None else None
@@ -309,18 +233,15 @@ def evaluate_single_game(
             agent.reset()
 
         def _reset_game_state(env, agent, run_metrics, initial_reset=True):
-            observation, info = _run_with_retries(
+            observation = _run_with_retries(
                 env.reset,
                 task={"game_id": game_id, "max_actions": max_actions_per_game, "tags": tags},
             )
 
-            arc_info = info.get("arc", {})
-            arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
-            arc_score = arc_info.get("score", 0) or 0
-            run_metrics.guid = arc_info.get("guid")
-            run_metrics.replay_url = arc_info.get("replay_url")
+            arc_state = GameState[observation.get("state") or "NOT_PLAYED"]
+            arc_score = observation.get("score", 0) or 0
 
-            agent.update_from_env(observation=observation, reward=0.0, done=False, info=info)
+            agent.update_from_env(observation=observation, reward=0.0, done=False)
 
             return arc_state, arc_score
         arc_state, arc_score = _reset_game_state(env, agent, run_metrics)
@@ -334,139 +255,63 @@ def evaluate_single_game(
             current_level_metrics.attempts.append(current_attempt_metrics)
             return attempt_end_time
 
+        prev_chat_len = 0  # For delta logging
+
         while total_actions_this_run < max_actions_per_game:
-            # Capture current state before action (use last frame as state representation)
-            state_before_action = None
-            if env._episode_frames:
-                # Create hashable representation of state (use frame data)
-                frame_data = env._episode_frames[-1]
-
-                # Apply crop_border to exclude time/score indicators from state hash
-                frame_for_hash = frame_data.frame
-                if frame_for_hash and hasattr(agent, 'crop_border') and agent.crop_border > 0:
-                    c = agent.crop_border
-                    # Crop each channel of the frame
-                    frame_for_hash = [
-                        [row[c:-c] for row in channel[c:-c]]
-                        for channel in frame_data.frame
-                    ]
-
-                state_hash = hash((
-                    tuple(tuple(tuple(row) for row in channel) for channel in frame_for_hash) if frame_for_hash else (),
-                    # Don't include score in hash since it's in the border we're ignoring
-                    frame_data.state.value if frame_data.state else None
-                ))
-                state_before_action = state_hash
-
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
             print(f"[DEBUG]:harness:action_obj={action_obj}")
+            observation, reward, done = _run_with_retries(env.step, action_obj)
+            print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}")
 
-            # Get action name for duplicate tracking
-            action_name = action_obj.get("action", "").name if hasattr(action_obj.get("action", ""), "name") else str(action_obj.get("action", ""))
-
-            observation, reward, done, info = _run_with_retries(env.step, action_obj)
-
-            # Increment BEFORE logging to ensure monotonic step counter
             total_actions_this_run += 1
             current_attempt_metrics.actions += 1
 
-            # Check for duplicate state-action pair
-            is_duplicate_action = False
-            if state_before_action is not None:
-                state_action_pair = (state_before_action, action_name)
-                if state_action_pair in seen_state_action_pairs:
-                    is_duplicate_action = True
-                    duplicate_action_count += 1
-                    log.info(f"[{game_id} Run {run_index}] DUPLICATE state-action pair detected at step {total_actions_this_run}: action={action_name}")
-                else:
-                    seen_state_action_pairs.add(state_action_pair)
-
-            print(f"[DEBUG]:harness:[{game_id} Run {run_index}] reward={reward}, done={done}, step={total_actions_this_run}, duplicate={is_duplicate_action}, guid:{env._episode_guid}")
-
             previous_arc_state = arc_state
             previous_arc_score = arc_score
-            arc_info = info.get("arc", {})
-            new_arc_state = GameState(arc_info.get("state") or GameState.NOT_PLAYED)
-            new_arc_score = arc_info.get("score", 0) or 0
-            run_metrics.guid = run_metrics.guid or arc_info.get("guid")
-            run_metrics.replay_url = run_metrics.replay_url or arc_info.get("replay_url")
+            new_arc_state = GameState[observation.get("state") or "NOT_PLAYED"]
+            new_arc_score = observation.get("score", 0) or 0
 
-            # Detect if game reset to an earlier level (score dropped)
-            if new_arc_score < previous_arc_score:
-                # Game was reset, sync current_level_number to actual game level
-                current_level_number = new_arc_score + 1
-                current_level_metrics = LevelMetrics(level_number=current_level_number)
-                current_attempt_number = 1
-                current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
-                attempt_start_time = time.time()
-                # Clear state-action tracking on game reset
-                seen_state_action_pairs.clear()
-                log.info(f"[{game_id} Run {run_index}] Game reset detected (score {previous_arc_score} -> {new_arc_score}). Reset to Level {current_level_number}.")
-
-            if len(env._episode_frames) >= 2 and env._episode_frames[-2] != env._episode_frames[-1]:
-                current_attempt_metrics.state_changes += 1
             arc_state = new_arc_state
             arc_score = new_arc_score
             max_score = max(max_score, arc_score)
             run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
 
-            agent.update_from_env(observation=observation, reward=reward, done=done, info=info)
+            agent.update_from_env(observation=observation, reward=reward, done=done)
 
-            # Log metrics to W&B using custom action metric as x-axis
-            if wandb_run and WANDB_AVAILABLE:
-                try:
-                    wandb_run.log({
-                        "action": total_actions_this_run,  # Custom x-axis
-                        "score": arc_score,
-                        "level": current_level_number,
-                        "state": arc_state.value if arc_state else 0,
-                        "highest_level_reached": run_metrics.highest_level_reached,
-                        "state_changes": current_attempt_metrics.state_changes,
-                        "is_duplicate_action": 1 if is_duplicate_action else 0,
-                        "duplicate_action_count": duplicate_action_count,
-                    })  # No step parameter - using custom action metric
-                except Exception as e:
-                    log.debug(f"[{game_id} Run {run_index}] W&B logging error: {e}")
-
-            # Log prompts and responses
+            # Log prompts/responses (delta only)
             if prompts_log_path and hasattr(agent, 'trajectory') and agent.trajectory.steps:
                 last_step = agent.trajectory.steps[-1]
                 with open(prompts_log_path, 'a', encoding='utf-8') as f:
                     f.write(f"\n{'='*80}\n")
                     f.write(f"Action {total_actions_this_run} | Level {current_level_number} | Attempt {current_attempt_number}\n")
-                    f.write(f"Score: {arc_score} | Highest Level Reached: {run_metrics.highest_level_reached}\n")
-                    f.write(f"State: {arc_state.name if arc_state else 'UNKNOWN'}")
-                    if is_duplicate_action:
-                        f.write(f" | ⚠️ DUPLICATE STATE-ACTION PAIR")
-                    f.write(f"\n")
-                    f.write(f"State Changes: {current_attempt_metrics.state_changes} | Duplicate Actions: {duplicate_action_count}\n")
+                    f.write(f"Score: {arc_score} | State: {arc_state.name if hasattr(arc_state, 'name') else arc_state}\n")
                     f.write(f"{'='*80}\n\n")
 
-                    # Log chat completions (prompts and responses)
                     if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
-                        for msg in last_step.chat_completions:
+                        new_messages = last_step.chat_completions[prev_chat_len:]
+                        for msg in new_messages:
                             role = msg.get('role', 'unknown')
                             content = msg.get('content', '')
+                            tool_calls = msg.get('tool_calls', [])
+                            f.write(f"[{role.upper()}]\n")
+                            if content:
+                                f.write(f"{content}\n")
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    fn = tc.get('function', {}) if isinstance(tc, dict) else {}
+                                    f.write(f"Tool: {fn.get('name', tc)}({fn.get('arguments', '')})\n")
+                            f.write("\n")
+                        prev_chat_len = len(last_step.chat_completions)
 
-                            if role == 'observation_phase':
-                                f.write("OBSERVATION PHASE PROMPT:\n")
-                                f.write("-" * 80 + "\n")
-                                f.write(f"{content}\n\n")
-                            elif role == 'observation_response':
-                                f.write("OBSERVATION RESPONSE:\n")
-                                f.write("-" * 80 + "\n")
-                                f.write(f"{content}\n\n")
-                            elif role == 'action_phase':
-                                f.write("ACTION PHASE PROMPT:\n")
-                                f.write("-" * 80 + "\n")
-                                f.write(f"{content}\n\n")
-                            elif role == 'action_response':
-                                f.write("ACTION RESPONSE:\n")
-                                f.write("-" * 80 + "\n")
-                                f.write(f"{content}\n\n")
-                            else:
-                                f.write(f"[{role.upper()}]\n{content}\n\n")
+            # Log metrics to W&B
+            if wandb_run:
+                wandb_run.log({
+                    "action": total_actions_this_run,
+                    "score": arc_score,
+                    "level": current_level_number,
+                    "highest_level_reached": run_metrics.highest_level_reached,
+                })
 
             # --- Handle Level Completion ---
             level_completed = (new_arc_score > previous_arc_score and 
@@ -481,6 +326,7 @@ def evaluate_single_game(
                 log.info(f"[{game_id} Run {run_index}] Level {current_level_number} COMPLETED. Attempt {current_attempt_number} actions: {current_attempt_metrics.actions}. Score: {new_arc_score}.")
 
                 current_level_number += 1
+                run_metrics.highest_level_reached = max(run_metrics.highest_level_reached, current_level_number)
                 current_level_metrics = LevelMetrics(level_number=current_level_number)
                 current_attempt_number = 1
                 current_attempt_metrics = AttemptMetrics(attempt_number=current_attempt_number)
@@ -550,17 +396,17 @@ def evaluate_single_game(
         run_metrics.total_state_changes_across_run = sum(lm.total_state_changes for lm in run_metrics.level_metrics.values())
         run_metrics.total_actions_taken = total_actions_this_run
         run_metrics.final_score = max_score
-        run_metrics.duplicate_actions = duplicate_action_count
 
         if run_metrics.guid and not run_metrics.replay_url:
             run_metrics.replay_url = f"{ROOT_URL}/replay/{game_id}/{run_metrics.guid}"
 
-        # Close W&B run for this game
-        if wandb_run and WANDB_AVAILABLE:
-            wandb_run.finish()
 
         if rollout_loop is not None:
             rollout_loop.close()
+
+        # Close W&B run for this game
+        if wandb_run:
+            wandb_run.finish()
 
     return run_metrics
 
@@ -576,22 +422,30 @@ def run_evaluation_task(
     agent_name_with_variant: str,
     eval_tags: Optional[List[str]] = None,
     rollout_engine: Optional[OpenAIEngine] = None,
-    prompts_log_dir: Optional[Path] = None,
     wandb_project: Optional[str] = None,
     wandb_group: Optional[str] = None,
     wandb_config: Optional[Dict] = None,
     wandb_tags: Optional[List[str]] = None,
+    prompts_log_dir: Optional[Path] = None,
 ) -> GameMetrics:
     """Creates an agent and runs evaluate_single_game for one task."""
 
     log.debug(f"Task starting: Game {game_id}, Run {run_index}")
 
+    # Create per-game prompts log path
+    prompts_log_path = None
+    if prompts_log_dir:
+        prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
+
+    # Convert operation_mode string to OperationMode enum
+    operation_mode = OperationMode(getattr(args, 'operation_mode', 'normal'))
+    
     env = ArcAgi3Env(
         game_id=game_id,
-        root_url=ROOT_URL,
-        api_key=os.getenv("ARC_API_KEY", ""),
         max_actions=max_actions,
-        tags=eval_tags,
+        arc_api_key=os.getenv("ARC_API_KEY", ""),
+        arc_base_url=ROOT_URL,
+        operation_mode=operation_mode,
     )
 
     try:
@@ -613,46 +467,41 @@ def run_evaluation_task(
                     agent_kwargs["image_detail_level"] = args.image_detail_level
                     agent_kwargs["pixels_per_cell"] = args.image_pixels_per_cell
 
-            # Build representation config from CLI args (used by multiple agent types)
+            # Build representation config from CLI args
             rep_config = RepresentationConfig(
                 format=GridFormat(getattr(args, 'grid_format', 'integers_spaced')),
                 downsample=not getattr(args, 'no_downsample', False),
             )
             use_general = getattr(args, 'use_general_prompts', False)
 
+            # Only add representation to agents that support it
+            if "arcagi3_agent" == agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
+
             if "guided" in agent_name_cli.lower():
+                agent_kwargs["representation"] = rep_config
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["game_id"] = game_id
+                agent_kwargs["use_general"] = use_general
+
+            if "memory" in agent_name_cli.lower() or "hypothesis" in agent_name_cli.lower():
                 agent_kwargs["representation"] = rep_config
                 agent_kwargs["use_general"] = use_general
 
-            if "memory" in agent_name_cli.lower():
-                # Memory/hypothesis agents also support representation
-                agent_kwargs["representation"] = rep_config
-                agent_kwargs["use_general"] = use_general
+            if "basic_obs_action" in agent_name_cli.lower():
+                agent_kwargs["game_id"] = game_id
+                agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
+                agent_kwargs["downsample"] = not getattr(args, 'no_downsample', False)
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
                 agent_kwargs["use_64x64"] = getattr(args, 'no_downsample', False)
                 agent_kwargs["use_general_prompts"] = use_general
                 agent_kwargs["no_progressive"] = getattr(args, 'no_progressive', False)
-                agent_kwargs["representation"] = rep_config
-
-            if "basic_obs_action" in agent_name_cli.lower() or "graph_explorer" in agent_name_cli.lower():
-                agent_kwargs["crop_border"] = args.crop_border
-                agent_kwargs["use_as66_prompts"] = args.use_as66_prompts
-                # Add context_window_size for rolling context variant
-                if "rolling_context" in agent_name_cli.lower() or "directed_graph_memory" in agent_name_cli.lower():
-                    agent_kwargs["context_window_size"] = args.context_window_size
-
+            
             agent_instance = agent_class(**agent_kwargs)
         else:
             raise ValueError(f"Agent class {agent_class} is not a subclass of BaseAgent.")
-
-        # Create prompts log file
-        prompts_log_path = None
-        if prompts_log_dir:
-            prompts_log_path = prompts_log_dir / f"{game_id}_run{run_index}.txt"
 
         metrics = evaluate_single_game(
             agent=agent_instance,
@@ -663,11 +512,11 @@ def run_evaluation_task(
             run_index=run_index,
             tags=eval_tags,
             rollout_engine=rollout_engine,
-            prompts_log_path=prompts_log_path,
             wandb_project=wandb_project,
             wandb_group=wandb_group,
             wandb_config=wandb_config,
             wandb_tags=wandb_tags,
+            prompts_log_path=prompts_log_path,
         )
         log.debug(f"Task finished: Game {game_id}, Run {run_index} -> Status: {metrics.status}")
         return metrics
@@ -690,8 +539,6 @@ def main():
     parser.add_argument("--agent-reasoning-effort", dest="agent_reasoning_effort", default="low", help="Override the agent's default reasoning effort.")
     parser.add_argument("--include-text-diff", dest="include_text_diff", default="true", help="Value for INCLUDE_TEXT_DIFF.")
     parser.add_argument("--context-length-limit", dest="context_length_limit", type=int, default=-1, help="Value for CONTEXT_LENGTH_LIMIT.")
-    parser.add_argument("--crop-border", dest="crop_border", type=int, default=0, help="Remove outer N pixels from 16x16 grid (e.g., 2 for scoring numbers).")
-    parser.add_argument("--context-window-size", dest="context_window_size", type=int, default=5, help="Number of past steps to include in rolling context (default: 5, use 0 for no history).")
     parser.add_argument("--downsample-images", dest="downsample_images", default="true", help="Value for DOWNSAMPLE_IMAGES.")
     parser.add_argument("--image-detail-level", dest="image_detail_level", default="low", help="Value for IMAGE_DETAIL_LEVEL.")
     parser.add_argument("--image-pixels-per-cell", dest="image_pixels_per_cell", type=int, default=24, help="Value for IMAGE_PIXELS_PER_CELL.")
@@ -707,8 +554,6 @@ def main():
         help="Use full 64x64 grid instead of 16x16 downsampled")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
-    parser.add_argument("--use-as66-prompts", dest="use_as66_prompts", action="store_true",
-        help="Use AS66-specific game rules in prompts (for basic_obs_action agents)")
     parser.add_argument("--wandb", dest="use_wandb", action="store_true",
         help="Enable Weights & Biases logging for metrics tracking")
     parser.add_argument("--wandb-project", dest="wandb_project", default="lucidgym-evaluation",
@@ -717,11 +562,9 @@ def main():
         help="Enable W&B Weave for LLM tracing and evaluation")
     parser.add_argument("--weave-project", dest="weave_project", default="lucidgym-evaluation",
         help="Weave project name in format 'entity/project' (default: lucidgym-evaluation)")
-    parser.add_argument("--use-responses-api", dest="use_responses_api", action="store_true",
-        help="Use OpenAI Responses API instead of Chat Completions (required for GPT-5.2 reasoning)")
-    parser.add_argument("--verbosity", dest="verbosity", default="medium",
-        choices=["low", "medium", "high"],
-        help="Output verbosity for Responses API (default: medium)")
+    parser.add_argument("--operation-mode", dest="operation_mode", default="normal",
+        choices=["normal", "online", "offline"],
+        help="ARC environment operation mode: normal (local + API), online (API only), offline (local only)")
     args = parser.parse_args()
 
     agent_name_cli = args.agent 
@@ -739,22 +582,17 @@ def main():
 
     # Initialize Weave for LLM tracing if enabled
     if args.use_weave:
-        if not WEAVE_AVAILABLE:
-            log.warning("Weave tracing requested but weave package not installed. Install with: pip install weave")
-        else:
-            weave.init(args.weave_project)
-            log.info(f"✓ Weave initialized for project: {args.weave_project}")
-            log.info(f"  LLM calls will be automatically traced") 
-    
-    # --- Setup Results Files (with new naming convention) ---
+        import weave
+        weave.init(args.weave_project)
+        log.info(f"Weave initialized for project: {args.weave_project}")
+
+    # --- Setup Results Files ---
     results_dir = Path("evaluation_results")
     results_dir.mkdir(exist_ok=True)
-    # Use EST (UTC-5) for timestamps (without year)
-    est = timezone(timedelta(hours=-5))
-    timestamp = datetime.now(est).strftime("%m%dT%H%M%S") 
+    est_tz = ZoneInfo("America/New_York")
+    timestamp = datetime.now(est_tz).strftime("%m%dT%H%M%S")
 
-
-    #  Get all tags for filename AND for passing to threads 
+    #  Get all tags for filename AND for passing to threads
     agent_tags = [agent_name_cli] + _get_agent_tags(agent_name_cli, args)
     agent_name_with_variant = "-".join(agent_tags)
 
@@ -762,73 +600,36 @@ def main():
 
     rollout_model = args.agent_model_override
     rollout_reasoning_effort = args.agent_reasoning_effort
-    rollout_engine = _build_rollout_engine(
-        rollout_model,
-        reasoning_effort=rollout_reasoning_effort,
-        use_responses_api=args.use_responses_api,
-        verbosity=args.verbosity,
-    )
-    
-    # Build comprehensive filename (date first for natural sorting)
-    base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
+    rollout_engine = _build_rollout_engine(rollout_model, reasoning_effort=rollout_reasoning_effort)
 
-    # Create a folder for this evaluation run
+    # Build run directory (timestamp first for sorting)
+    base_dirname = f"{timestamp}_{agent_name_with_variant}_{args.suite}_runs{num_runs}_max{args.max_actions}"
     run_dir = results_dir / base_dirname
-    run_dir.mkdir(exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     results_filepath_jsonl = run_dir / "results.jsonl"
     results_filepath_txt = run_dir / "summary.txt"
     prompts_log_dir = run_dir / "prompts"
     prompts_log_dir.mkdir(exist_ok=True)
+
     file_lock = threading.Lock()
-    # wandb_lock = threading.Lock()  # Lock for thread-safe W&B logging
-    log.info(f"Detailed results (JSONL): {results_filepath_jsonl}")
-    log.info(f"Summary report (TXT): {results_filepath_txt}")
-    log.info(f"Prompts logs directory: {prompts_log_dir}")
+    log.info(f"Run directory: {run_dir}")
 
     # Setup W&B group if enabled
     wandb_group = None
     wandb_config = None
     wandb_tags = None
     if args.use_wandb:
-        if not WANDB_AVAILABLE:
-            log.warning("W&B logging requested but wandb package not installed. Install with: pip install wandb")
-        else:
-            log.info(f"W&B enabled - project: {args.wandb_project}")
-            # Create a group for this entire evaluation session
-            wandb_group = base_dirname
-            # Use shorter tags for W&B (max 64 chars each)
-            wandb_tags = [
-                agent_name_cli,  # Base agent name
-                args.suite,
-                args.agent_model_override.split('/')[-1],  # Model without provider prefix
-            ]
-            # Shared config for all runs in this group
-            wandb_config = {
-                "agent": agent_name_with_variant,
-                "suite": args.suite,
-                "num_runs": num_runs,
-                "max_actions": args.max_actions,
-                "max_workers": max_workers,
-                "model": args.agent_model_override,
-                "reasoning_effort": args.agent_reasoning_effort,
-                "crop_border": args.crop_border,
-                "context_window_size": args.context_window_size,
-                "grid_format": args.grid_format,
-                "input_mode": args.input_mode,
-                "downsample": not args.no_downsample,
-                "use_general_prompts": args.use_general_prompts,
-                "use_as66_prompts": args.use_as66_prompts,
-                "context_length_limit": args.context_length_limit,
-                "include_text_diff": args.include_text_diff,
-                "downsample_images": args.downsample_images,
-                "image_detail_level": args.image_detail_level,
-                "image_pixels_per_cell": args.image_pixels_per_cell,
-                "arcgame_general_prompts": args.arcgame_general_prompts,
-                "use_weave": args.use_weave,
-            }
-            log.info(f"  W&B group: {wandb_group}")
-            log.info(f"  Each game will create a separate run in this group")
+        wandb_group = base_dirname
+        wandb_tags = [agent_name_cli, args.suite, args.agent_model_override.split('/')[-1]]
+        wandb_config = {
+            "agent": agent_name_with_variant,
+            "suite": args.suite,
+            "num_runs": num_runs,
+            "max_actions": args.max_actions,
+            "model": args.agent_model_override,
+        }
+        log.info(f"W&B enabled - project: {args.wandb_project}, group: {wandb_group}")
 
     overall_start_time = time.time()
     game_metrics_objects_list: List[GameMetrics] = []
@@ -853,16 +654,16 @@ def main():
                     game_id,
                     run_index,
                     agent_class,
-                    agent_name_cli, # Pass the base name
+                    agent_name_cli,
                     args.max_actions,
-                    agent_name_with_variant, # Pass the full name
+                    agent_name_with_variant,
                     eval_tags,
                     rollout_engine,
-                    prompts_log_dir,
                     args.wandb_project if args.use_wandb else None,
                     wandb_group,
                     wandb_config,
                     wandb_tags,
+                    prompts_log_dir,
                 ): (game_id, run_index)
                 for game_id, run_index in tasks_to_run
             }
@@ -872,12 +673,8 @@ def main():
                 try:
                     result_metrics: GameMetrics = future.result()
                     # Store the object for final stats
-                    game_metrics_objects_list.append(result_metrics)
-
-                    # Print replay URL immediately after run completes
-                    if result_metrics.replay_url:
-                        print(f"[{game_id} Run {run_index}] Replay: {result_metrics.replay_url}")
-
+                    game_metrics_objects_list.append(result_metrics) 
+                    
                     # Convert to dict for JSONL saving
                     metrics_dict = dataclasses.asdict(result_metrics)
                     
@@ -957,6 +754,7 @@ def main():
             log.info(f"Saving summary report to: {results_filepath_txt}")
             try:
                 save_summary_report(
+                    args,
                     str(results_filepath_txt), 
                     game_stats, overall_summary, game_metrics_objects_list, # Pass objects
                     agent_name_with_variant, args.suite, num_runs

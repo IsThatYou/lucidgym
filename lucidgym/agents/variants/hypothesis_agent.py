@@ -15,7 +15,7 @@ from openai import OpenAI
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
-from lucidgym.environments.arcagi3.structs import GameAction, GameState
+from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import downsample_4x4, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 from lucidgym.prompts.memory_prompts import (
@@ -565,6 +565,8 @@ class AS66MemoryAgent(ArcAgi3Agent):
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
         if action.requires_coordinates():
-            action_dict2["x"] = action_dict["data"].get("x", 0)
-            action_dict2["y"] = action_dict["data"].get("y", 0)
+            # Safe dict access - action_dict may not have "data" key
+            data = action_dict.get("data", {})
+            action_dict2["x"] = data.get("x", 0)
+            action_dict2["y"] = data.get("y", 0)
         return action_dict2

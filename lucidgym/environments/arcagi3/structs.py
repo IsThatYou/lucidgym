@@ -224,11 +224,17 @@ class FrameData(BaseModel):
     game_id: str = ""
     frame: list[list[list[int]]] = []
     state: GameState = GameState.NOT_PLAYED
-    score: int = Field(0, ge=0, le=254)
+    levels_completed: int = Field(0, ge=0, le=254)
+    win_levels: int = Field(0, ge=0, le=254)
     action_input: ActionInput = Field(default_factory=lambda: ActionInput())
     guid: Optional[str] = None
     full_reset: bool = False
     available_actions: list[GameAction] = Field(default_factory=list)
+
+    @property
+    def score(self) -> int:
+        """Alias for levels_completed for backward compatibility."""
+        return self.levels_completed
 
     @field_validator("available_actions", mode="before")
     @classmethod

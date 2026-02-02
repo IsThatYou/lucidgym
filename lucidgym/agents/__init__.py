@@ -12,6 +12,7 @@ from .new_variants.basic_obs_action_agent import BasicObsActionAgent
 from .new_variants.basic_obs_action_agent_rolling_context import BasicObsActionAgentRollingContext
 from .new_variants.basic_obs_action_agent_directed_graph_memory import BasicObsActionAgentDirectedGraphMemory
 from .new_variants.basic_obs_action_agent_graph_memory import BasicObsActionAgentGraphMemory
+from .new_variants.basic_obs_action_agent_cycle_detection import BasicObsActionAgentCycleDetection
 from .new_variants.graph_explorer_agent import GraphExplorerAgent
 from .new_variants.graph_explorer_obs_action_agent import GraphExplorerObsActionAgent
 
@@ -29,6 +30,7 @@ AVAILABLE_AGENTS = {
     "basic_obs_action_agent_rolling_context": BasicObsActionAgentRollingContext,
     "basic_obs_action_agent_directed_graph_memory": BasicObsActionAgentDirectedGraphMemory,
     "basic_obs_action_agent_graph_memory": BasicObsActionAgentGraphMemory,
+    "basic_obs_action_agent_cycle_detection": BasicObsActionAgentCycleDetection,
     "graph_explorer_agent": GraphExplorerAgent,
     "graph_explorer_obs_action_agent": GraphExplorerObsActionAgent,
 }
@@ -46,6 +48,7 @@ __all__ = [
     "BasicObsActionAgentRollingContext",
     "BasicObsActionAgentDirectedGraphMemory",
     "BasicObsActionAgentGraphMemory",
+    "BasicObsActionAgentCycleDetection",
     "GraphExplorerAgent",
     "GraphExplorerObsActionAgent",
     "AVAILABLE_AGENTS",

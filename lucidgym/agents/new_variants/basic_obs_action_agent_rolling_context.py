@@ -53,12 +53,13 @@ def build_observation_system_text(use_as66_prompts: bool = False):
             "- Boundaries delimit the play field.\n"
             "- Some levels have enemies (large blocks) - collision means game over.\n\n"
             "For observation, analyze:\n"
-            "1. Locate the movable piece(s) and key structures\n"
-            "2. For each direction, simulate where the piece would land\n"
-            "3. Consider enemy movement if present\n"
-            "4. Determine which direction best progresses toward the goal\n\n"
-            "DO NOT call an action tool here - only provide analysis.\n"
-            "THE MOST IMPORTANT THING TO KEEP IN MIND IS THE RESULTS OF YOUR PAST ACTIONS. DO NOT REPEAT ACTIONS THAT CHANGED NOTHING."
+            "1. **FIRST: Review Recent History** - Check which actions you already tried and whether they caused state changes\n"
+            "2. Locate the movable piece(s) and key structures\n"
+            "3. For each direction, simulate where the piece would land\n"
+            "4. Consider enemy movement if present\n"
+            "5. Determine which direction best progresses toward the goal\n\n"
+            "DO NOT call an action tool here - only provide analysis.\n\n"
+            "⚠️ CRITICAL: Check the **Recent History** section below. Actions marked with '⚠️ NO STATE CHANGE' did nothing - DO NOT repeat them from the same board state. Try a DIFFERENT action."
         )
     else:
         # Generic prompts
@@ -78,7 +79,8 @@ def build_action_system_text(use_as66_prompts: bool = False):
             "- ACTION1 = Up\n"
             "- ACTION2 = Down\n"
             "- ACTION3 = Left\n"
-            "- ACTION4 = Right"
+            "- ACTION4 = Right\n\n"
+            "⚠️ Do NOT repeat actions that caused NO STATE CHANGE in the recent history."
         )
     else:
         # Generic action prompt
@@ -245,8 +247,9 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         history_lines = ["**Recent History:**\n"]
         for step_info in self._step_history:
+            duplicate_marker = " ⚠️ NO STATE CHANGE (duplicate)" if step_info.get('no_state_change') else ""
             history_lines.append(
-                f"Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}, State={step_info['state']}\n"
+                f"Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}, State={step_info['state']}{duplicate_marker}\n"
                 f"Board:\n{step_info['grid']}\n"
             )
         return "\n".join(history_lines) + "\n"
@@ -337,12 +340,20 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         else:
             grid_str = ""
 
+        # Detect if this action caused no state change (duplicate state-action)
+        no_state_change = False
+        if self._step_history:
+            prev_grid = self._step_history[-1].get("grid", "")
+            if prev_grid == grid_str:
+                no_state_change = True
+
         self._step_history.append({
             "step": self._action_counter,
             "action": action_dict["name"],
             "score": obs.get("score", 0),
             "state": obs.get("state", "UNKNOWN"),
-            "grid": grid_str
+            "grid": grid_str,
+            "no_state_change": no_state_change
         })
 
         self._action_counter += 1
@@ -466,6 +477,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         user_msg_text = (
             f"{history_context}"
+            "Based on the history above, choose a move that will actually change the state.\n"
             "Choose the best single move as a function call.\n"
             f"{grid}"
             "Previous observation summary:\n"

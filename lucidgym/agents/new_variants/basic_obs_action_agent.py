@@ -16,7 +16,8 @@ from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
 
 from arcengine import GameAction, GameState
-from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
+from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes, format_grid
+from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
 
 log = logging.getLogger(__name__)
@@ -126,8 +127,9 @@ class BasicObsActionAgent(ArcAgi3Agent):
         input_mode: str = "text_only",
         model: str = "gpt-5-nano",
         reasoning_effort: str = "low",
-        downsample = True,
+        downsample: bool = True,
         game_id: str | None = None,
+        representation: RepresentationConfig | None = None,
     ) -> None:
         """
         Initialize the agent.
@@ -138,15 +140,20 @@ class BasicObsActionAgent(ArcAgi3Agent):
             input_mode: 'text_only', 'image_only', or 'text_and_image'
             model: OpenAI model to use
             reasoning_effort: Reasoning effort level
+            downsample: Whether to downsample 64x64 to 16x16
             game_id: Game ID for prompt selection
+            representation: RepresentationConfig for grid formatting
         """
-        super().__init__(system_prompt=system_prompt, name=name)
+        # Create representation config before calling super().__init__
+        self.representation = representation or RepresentationConfig(
+            downsample=downsample,
+        )
+        super().__init__(system_prompt=system_prompt, name=name, downsample=downsample, representation=self.representation)
         self.input_mode = input_mode
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.game_id = game_id
         self._system_prompt_override = system_prompt
-        self.downsample = downsample
 
         if self.input_mode not in ["text_only", "image_only", "text_and_image"]:
             log.warning(f"Invalid input_mode '{self.input_mode}', defaulting to 'text_only'.")
@@ -228,7 +235,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         self._pending_action = None
         action = GameAction.from_name(action_dict["name"])
         action_dict2 = {"action": action, "reasoning": response_text}
-        if action.requires_coordinates():
+        if action.is_complex():
             action_dict2["x"] = action_dict["data"]["x"]
             action_dict2["y"] = action_dict["data"]["y"]
         return action_dict2
@@ -245,46 +252,54 @@ class BasicObsActionAgent(ArcAgi3Agent):
             self._pending_action = action_dict
             return action_dict
 
-        # Extract frame and downsample
+        # Extract frame and format using representation config
         frame_3d = obs.get("frame", [])
-
-        if self.downsample:
-            grid = frame_to_grid_text([downsample_4x4(frame_3d)])
-        else:
-            grid = frame_to_grid_text([frame_3d])
+        grid_text = self._format_grid(frame_3d)
         score = obs.get("score", 0)
 
         # DEBUG alternate between ACTION1 and ACTION2
         # action_name = "ACTION1" if self._action_counter % 2 == 0 else "ACTION2"
         # action_dict = {"name": action_name, "data": {}, "obs_text": "", "action_text": ""}
             
-        # # Step 1: Observation phase
-        obs_text = await self._call_observation_model(grid, score, rollout_engine=rollout_engine)
+        # Step 1: Observation phase
+        obs_text = await self._call_observation_model(grid_text, score, rollout_engine=rollout_engine)
 
-        # # Step 2: Action selection phase
-        action_dict = await self._call_action_model(grid, obs_text, rollout_engine=rollout_engine)
+        # Step 2: Action selection phase
+        action_dict = await self._call_action_model(grid_text, obs_text, rollout_engine=rollout_engine)
         action_dict["obs_text"] = obs_text
 
         # Stash for update_from_model to record
         self._pending_action = action_dict
         return action_dict
 
-    def _build_user_content(self, grid: List[List[int]], user_prompt_text: str) -> List[Dict[str, Any]]:
-        """Build the 'content' array for the API call based on input_mode."""
+    def _format_grid(self, frame_3d: List[List[List[int]]]) -> str:
+        """Format the grid using the representation config."""
+        if self.representation:
+            if self.representation.downsample:
+                grid_2d = downsample_4x4(frame_3d) if frame_3d else []
+            else:
+                # Get raw 2D grid from 3D frame
+                grid_2d = frame_3d[-1] if frame_3d else []
+            return format_grid(grid_2d, self.representation) if grid_2d else "No frame data"
+        elif self.downsample:
+            return frame_to_grid_text([downsample_4x4(frame_3d)])
+        else:
+            return frame_to_grid_text([frame_3d])
+
+    def _build_user_content(self, grid_text: str, user_prompt_text: str) -> List[Dict[str, Any]]:
+        """Build the 'content' array for the API call based on input_mode.
+        
+        Args:
+            grid_text: Pre-formatted grid text string
+            user_prompt_text: The user prompt text to include
+        """
         content: List[Dict[str, Any]] = [{"type": "text", "text": user_prompt_text}]
 
         if self.input_mode in ["image_only", "text_and_image"]:
             try:
-                png_bytes = generate_numeric_grid_image_bytes(grid)
-                b64_image = base64.b64encode(png_bytes).decode('utf-8')
-                data_url = f"data:image/png;base64,{b64_image}"
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                        "detail": "low"
-                    }
-                })
+                # Note: image generation still needs the raw grid, not the formatted text
+                # This would need the original grid passed separately if image support is needed
+                log.warning("Image mode not fully supported with representation config yet")
             except Exception as e:
                 log.error(f"Failed to generate numeric grid image: {e}")
 
@@ -293,29 +308,36 @@ class BasicObsActionAgent(ArcAgi3Agent):
     async def rollout(self, rollout_engine: OpenAIEngine, messages: List[Dict[str, Any]], tools=None):
         return await rollout_engine.get_model_response(messages, tools=tools)
 
-    async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
-        """Call the model for observation/reasoning phase."""
+    async def _call_observation_model(self, grid_text: str, score: int, rollout_engine=None) -> str:
+        """Call the model for observation/reasoning phase.
+        
+        Args:
+            grid_text: Pre-formatted grid text string
+            score: Current game score
+            rollout_engine: The rollout engine for LLM calls
+        """
         sys_msg = build_observation_system_text()
 
-        include_text = self.input_mode in ["text_only", "text_and_image"]
-        grid_text = "16x16" if self.downsample else "64x64"
+        grid_size = "16x16" if self.downsample else "64x64"
+        format_desc = self.representation.get_format_description() if self.representation else "ASCII characters"
+        
         format_clarification = ""
         if self.input_mode == "image_only":
-            format_clarification = f"The board state is provided as an attached image of the {grid_text} grid."
+            format_clarification = f"The board state is provided as an attached image of the {grid_size} grid."
         elif self.input_mode == "text_and_image":
             format_clarification = "The board state is provided as both a textual matrix and an attached image."
 
         user_msg_text = (
             f"Score: {score}\n"
             f"Step: {self._action_counter}\n"
-            f"Matrix {grid_text} (ASCII characters):\n{grid}\n\n"
+            f"Matrix {grid_size} ({format_desc}):\n{grid_text}\n\n"
             "Rationale:\n"
-            "  • Identify the movable ASCII character(s) and relevant structures.\n"
+            "  • Identify the movable character(s) and relevant structures.\n"
             "  • Conclude which direction is best and why. Do not output an action here.\n"
             "  • Focus on the strategic importance of each character and how it relates to the goal."
         )
 
-        user_content = self._build_user_content(grid, user_msg_text)
+        user_content = self._build_user_content(grid_text, user_msg_text)
         user_content = user_content[0]['text']
 
         messages = [
@@ -332,11 +354,16 @@ class BasicObsActionAgent(ArcAgi3Agent):
             self._chat_history.append({"role": "assistant", "content": text})
         return text
 
-    async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
-        """Call the model for action selection phase."""
+    async def _call_action_model(self, grid_text: str, last_obs: str, rollout_engine=None) -> dict:
+        """Call the model for action selection phase.
+        
+        Args:
+            grid_text: Pre-formatted grid text string
+            last_obs: The observation text from the previous phase
+            rollout_engine: The rollout engine for LLM calls
+        """
         sys_msg = build_action_system_text()
 
-        include_text = self.input_mode in ["text_only", "text_and_image"]
         format_clarification = ""
         if self.input_mode == "image_only":
             format_clarification = "The board state is provided as an attached image."
@@ -345,12 +372,12 @@ class BasicObsActionAgent(ArcAgi3Agent):
 
         user_msg_text = (
             "Choose the best single move as a function call.\n"
-            f"{grid}"
+            f"{grid_text}\n"
             "Previous observation summary:\n"
             f"{last_obs}\n"
         )
 
-        user_content = self._build_user_content(grid, user_msg_text)
+        user_content = self._build_user_content(grid_text, user_msg_text)
         user_content = user_content[0]['text']
         tools = _build_tools()
 

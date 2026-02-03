@@ -57,6 +57,11 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
     api_key = openai_api_key
     base_url = "https://api.openai.com/v1"
 
+    sampling_params = {
+        "temperature": 1,
+        "max_completion_tokens": 8192,
+    }
+
     # Use Together/Qwen tokenizer when the model is not an OpenAI-prefixed model.
     if not model_name.startswith("gpt-"):
         api_key = together_api_key
@@ -64,14 +69,13 @@ def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> Ope
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
     if VLLM_URL:
         base_url = VLLM_URL
+        sampling_params.pop("max_completion_tokens")
+        sampling_params["max_tokens"] = 8192
+        sampling_params["temperature"] = 0.3
+    else:
+        if not api_key:
+            raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
 
-    if not api_key:
-        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
-
-    sampling_params = {
-        "temperature": 1,
-        "max_completion_tokens": 8192,
-    }
 
     # Only add reasoning_effort for models that support it (gpt-5.x and o-series models)
     supports_reasoning = model_name.startswith("gpt-5") or model_name.startswith("o1") or model_name.startswith("o3")
@@ -260,7 +264,7 @@ def evaluate_single_game(
         while total_actions_this_run < max_actions_per_game:
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
-            print(f"[DEBUG]:harness:action_obj={action_obj}")
+            # print(f"[DEBUG]:harness:action_obj={action_obj}")
             observation, reward, done = _run_with_retries(env.step, action_obj)
             print(f"[DEBUG]:harness:reward={reward}, done={done}, total actions:{total_actions_this_run+1}")
 

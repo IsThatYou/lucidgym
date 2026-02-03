@@ -3,16 +3,16 @@ source ../../.venv/bin/activate
 
 export OPENAI_API_KEY=$OPENAI_ARCAGI_API_KEY
 
-export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN # FLASH_ATTN, FLASHINFER, XFormers
 export VLLM_LOGGING_LEVEL=INFO
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-MODEL_ID="Qwen/Qwen3-30B-A3B-Instruct-2507"
+# MODEL_ID="Qwen/Qwen3-30B-A3B-Instruct-2507"
 MODEL_ID="Qwen/Qwen3-4B-Instruct-2507"
 PORT=8002
 TENSOR_PARALLEL_SIZE=8
-GPU_MEMORY_UTILIZATION=0.90
-# MAX_MODEL_LEN=262144 # Adjust based on your VRAM; Qwen usually supports long context
-MAX_MODEL_LEN=32768
+GPU_MEMORY_UTILIZATION=0.8
+MAX_MODEL_LEN=262144 # Adjust based on your VRAM; Qwen usually supports long context
+# MAX_MODEL_LEN=32768
 
 echo "Starting vLLM server for $MODEL_ID..."
 echo "Tensor Parallel Size: $TENSOR_PARALLEL_SIZE"
@@ -51,14 +51,17 @@ for i in {1..60}; do
 done
 
 export VLLM_URL="http://localhost:$PORT/v1"
-
 python -m lucidgym.evaluation.harness \
-    --agent arcagi3_agent \
+    --agent basic_obs_action_agent \
     --suite ls20_suite \
     --num_runs 1 \
     --max_actions 200 \
     --agent-model $MODEL_ID \
+    --input-mode text_only \
     --grid-format ascii \
-    --input-mode text_only
+    --agent-reasoning-effort medium \
+    --operation-mode online \
+    --wandb --wandb-project arcagi3-harness --weave --weave-project arcagi3-harness \
+
 
 # Results saved to evaluation_results/

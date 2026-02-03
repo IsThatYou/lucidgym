@@ -62,7 +62,7 @@ class ArcAgi3Env(BaseEnv):
             raise RuntimeError("ArcAgi3Env.step called before reset.")
 
         action, payload, reasoning = self._coerce_action(action_payload)
-        obs = self._env.step(action, data=payload, reasoning=reasoning)
+        obs = self._env.step(action, data=payload, reasoning=reasoning[:10000])
         self._actions_taken += 1
         self._last_obs = obs
         reward = self._compute_reward(obs)

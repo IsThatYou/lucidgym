@@ -22,6 +22,7 @@ from rllm.engine.rollout.rollout_engine import ModelOutput
 from arcengine import GameAction
 from lucidgym.utils.grid_processing import flatten_frame, downsample_4x4, frame_to_grid_text, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
+from rllm.tools.tool_base import ToolCall
 
 
 
@@ -123,6 +124,7 @@ class ArcAgi3Agent(BaseAgent):
         action_payload = {}
         args = {}
         text = response.text
+        # print(f"[DEBUG]:arcagi3_agent:len(text)={len(text)}, completion_length={len(response.completion_ids)}")
         content = response.content
         reasoning = getattr(response, 'reasoning', None)
         tool_calls = getattr(response, 'tool_calls', [])
@@ -135,11 +137,19 @@ class ArcAgi3Agent(BaseAgent):
                 self._latest_tool_call_id = "call_reset_1234"
                 tool_calls = [ChatCompletionMessageFunctionToolCall(id="call_reset_1234", function={"name": "RESET", "arguments": "{}"}, type="function")]
             else:
-                tc = response.tool_calls[0]
-                self._latest_tool_call_id = tc.id
-                name = tc.function.name
-                arguments = tc.function.arguments
-                args = json.loads(arguments or "{}")
+                # print(f"[DEBUG]:arcagi3_agent:tool_calls={tool_calls}")
+                if isinstance(tool_calls[0], ToolCall):
+                    tc = tool_calls[0]
+                    self._latest_tool_call_id = f"call_{tc.name}"
+                    name = tc.name
+                    arguments = tc.arguments
+                else:
+                    tc = tool_calls[0]
+                    self._latest_tool_call_id = tc.id
+                    name = tc.function.name
+                    arguments = tc.function.arguments
+                    args = json.loads(arguments or "{}")
+                
                 
                 if name == "ACTION6":
                     x_raw = int(args.get("x", 0))
@@ -172,7 +182,7 @@ class ArcAgi3Agent(BaseAgent):
         else:
             message = {"role": "assistant", "content": text}
 
-        print(f"[DEBUG]:arcagi3_agent:message={message}\nresponse={response}")
+        # print(f"[DEBUG]:arcagi3_agent:message={message}\nresponse={response}")
         self._chat_history.append(message)
         return action_payload
 

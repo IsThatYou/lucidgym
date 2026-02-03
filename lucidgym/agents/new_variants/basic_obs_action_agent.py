@@ -9,8 +9,11 @@ import logging
 import base64
 from openai import OpenAI
 
+
+from rllm.tools.tool_base import ToolCall
 from rllm.agents.agent import Action, BaseAgent, Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
+
 
 from arcengine import GameAction, GameState
 from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes
@@ -313,6 +316,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         )
 
         user_content = self._build_user_content(grid, user_msg_text)
+        user_content = user_content[0]['text']
 
         messages = [
             {"role": "system", "content": sys_msg},
@@ -347,6 +351,7 @@ class BasicObsActionAgent(ArcAgi3Agent):
         )
 
         user_content = self._build_user_content(grid, user_msg_text)
+        user_content = user_content[0]['text']
         tools = _build_tools()
 
         messages = [
@@ -371,23 +376,23 @@ class BasicObsActionAgent(ArcAgi3Agent):
             return {"name": "ACTION5", "data": {}, "action_text": "ACTION5"}
 
         tc = m
-        tc_id = tc.id
-        self._latest_tool_call_id = tc_id
-        name = tc.function.name
-        arguments = getattr(tc, "function", {}).get("arguments") if isinstance(tc, dict) else tc.function.arguments
-
-        try:
+        if isinstance(tc, ToolCall):
+            self._latest_tool_call_id = f"call_{tc.name}"
+            name = tc.name
+            args = tc.arguments
+        else:
+            self._latest_tool_call_id = tc.id
+            name = tc.function.name
+            arguments = tc.function.arguments
             args = json.loads(arguments or "{}")
-        except Exception:
-            args = {}
 
         # Add to chat history
         self._chat_history.append({
             "role": "assistant",
             "tool_calls": [{
-                "id": tc_id,
+                "id": self._latest_tool_call_id,
                 "type": "function",
-                "function": {"name": name, "arguments": arguments}
+                "function": {"name": name, "arguments": args}
             }]
         })
 

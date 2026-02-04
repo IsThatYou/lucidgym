@@ -67,6 +67,8 @@ python -m lucidgym.evaluation.harness \
     --agent-reasoning-effort "$REASONING" \
     --downsample-block-size "$BLOCK_SIZE" \
     --downsample-method "$DS_METHOD" \
+    --wandb \
+    --wandb-project lucidgym-evaluation \
     --weave \
     --weave-project lucidgym-eval
 

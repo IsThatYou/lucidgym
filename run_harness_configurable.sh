@@ -5,10 +5,10 @@
 # Default values
 AGENT=${1:-basic_obs_action_agent_rolling_context}
 SUITE=${2:-debug_suite}
-NUM_RUNS=${3:-1}
-MAX_WORKERS=${4:-1}
-MAX_ACTIONS=${5:-500}
-MODEL=${6:-openai/gpt-5-nano}
+NUM_RUNS=${3:-3}
+MAX_WORKERS=${4:-10}
+MAX_ACTIONS=${5:-150}
+MODEL=${6:-gpt-5}
 REASONING=${7:-high}
 BLOCK_SIZE=${8:-4}        # 4=16x16, 2=32x32, 1=64x64
 DS_METHOD=${9:-mode}      # mode or mean

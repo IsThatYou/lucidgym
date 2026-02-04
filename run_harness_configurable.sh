@@ -12,8 +12,8 @@ MAX_ACTIONS=${5:-150}
 MODEL=${6:-gpt-5}
 REASONING=${7:-high}
 BLOCK_SIZE=${8:-4}        # 4=16x16, 2=32x32, 1=64x64
-DS_METHOD=${9:-mode}      # mode or mean
-CLICK_ONLY=${10:-0}       # 1=click only, 0=all actions
+DS_METHOD=${9:-mean}      # mode or mean
+CLICK_ONLY=${10:-1}       # 1=click only, 0=all actions
 
 # Create logs directory if it doesn't exist
 mkdir -p logs

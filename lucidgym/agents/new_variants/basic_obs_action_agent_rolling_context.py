@@ -15,7 +15,7 @@ from rllm.agents.agent import Action, BaseAgent,Step, Trajectory
 from lucidgym.agents.arcagi3_agent import ArcAgi3Agent
 
 from arcengine import GameAction, GameState
-from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, generate_numeric_grid_image_bytes, format_grid
+from lucidgym.utils.grid_processing import frame_to_grid_text, downsample_4x4, downsample_grid, generate_numeric_grid_image_bytes, format_grid
 from lucidgym.utils.representation import RepresentationConfig, GridFormat
 
 # Optional Weave integration for LLM tracing
@@ -187,6 +187,8 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         crop_border: int = 0,  # Remove outer N pixels (e.g., 2 for scoring numbers)
         use_as66_prompts: bool = False,  # Use AS66-specific game rules
         representation: RepresentationConfig | None = None,  # Grid representation config
+        downsample_block_size: int = 4,  # Block size: 4=16x16, 2=32x32, 1=64x64
+        use_mode: bool = True,  # True=mode (most frequent), False=mean (average)
     ) -> None:
         """
         Initialize the agent with rolling context.
@@ -203,11 +205,15 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             crop_border: Remove outer N pixels from grid (e.g., 2 to remove scoring numbers)
             use_as66_prompts: Use AS66-specific game rules in prompts
             representation: Grid representation config for formatting
+            downsample_block_size: Block size for downsampling (4=16x16, 2=32x32, 1=64x64)
+            use_mode: Downsampling method - True for mode, False for mean
         """
         # Set context_window_size before calling super().__init__ because parent calls reset()
         self.context_window_size = context_window_size
         self.crop_border = crop_border
         self.use_as66_prompts = use_as66_prompts
+        self.downsample_block_size = downsample_block_size
+        self.use_mode = use_mode
 
         # Store representation to set AFTER super().__init__() since parent also sets self.representation
         _representation = representation or RepresentationConfig(format=GridFormat.ASCII)
@@ -345,7 +351,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
 
         # Process grid same way as in call_llm
         if self.downsample and len(frame_3d) > 0:
-            downsampled = downsample_4x4(frame_3d)
+            downsampled = downsample_grid(frame_3d, block_size=self.downsample_block_size, use_mode=self.use_mode)
             cropped = self._crop_grid(downsampled)
             grid_str = self._format_grid(cropped)
         elif len(frame_3d) > 0:
@@ -397,7 +403,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         frame_3d = obs.get("frame", [])
 
         if self.downsample:
-            downsampled = downsample_4x4(frame_3d)
+            downsampled = downsample_grid(frame_3d, block_size=self.downsample_block_size, use_mode=self.use_mode)
             cropped = self._crop_grid(downsampled)
             grid = self._format_grid(cropped)
         else:
@@ -445,9 +451,10 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         sys_msg = build_observation_system_text(self.use_as66_prompts)
 
         if self.downsample:
-            base_size = 16
+            # Calculate grid size based on block size: 64/4=16, 64/2=32, 64/1=64
+            base_size = 64 // self.downsample_block_size
             actual_size = base_size - (2 * self.crop_border)
-            grid_text = f"{actual_size}x{actual_size}" if self.crop_border > 0 else "16x16"
+            grid_text = f"{actual_size}x{actual_size}" if self.crop_border > 0 else f"{base_size}x{base_size}"
         else:
             grid_text = "64x64"
         history_context = self._format_step_history()

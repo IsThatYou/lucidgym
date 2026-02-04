@@ -7,8 +7,8 @@
 #SBATCH --output=logs/slurm_%j.out
 #SBATCH --error=logs/slurm_%j.err
 
-# Usage: sbatch run_harness_configurable.sbatch [agent_name] [suite] [num_runs] [max_workers]
-# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context training_suite 30 30
+# Usage: sbatch run_harness_configurable.sbatch [agent] [suite] [num_runs] [max_workers] [max_actions] [model] [reasoning] [block_size] [ds_method]
+# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode
 
 # Default values
 AGENT=${1:-basic_obs_action_agent_rolling_context}
@@ -18,6 +18,8 @@ MAX_WORKERS=${4:-1}
 MAX_ACTIONS=${5:-500}
 MODEL=${6:-openai/gpt-5-nano}
 REASONING=${7:-high}
+BLOCK_SIZE=${8:-4}        # 4=16x16, 2=32x32, 1=64x64
+DS_METHOD=${9:-mode}      # mode or mean
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -47,6 +49,8 @@ echo "  Max Workers: $MAX_WORKERS"
 echo "  Max Actions: $MAX_ACTIONS"
 echo "  Model: $MODEL"
 echo "  Reasoning Effort: $REASONING"
+echo "  Block Size: $BLOCK_SIZE (4=16x16, 2=32x32, 1=64x64)"
+echo "  Downsample Method: $DS_METHOD"
 echo "=========================================="
 
 # Set environment variables
@@ -61,6 +65,8 @@ python -m lucidgym.evaluation.harness \
     --max_workers "$MAX_WORKERS" \
     --agent-model "$MODEL" \
     --agent-reasoning-effort "$REASONING" \
+    --downsample-block-size "$BLOCK_SIZE" \
+    --downsample-method "$DS_METHOD" \
     --weave \
     --weave-project lucidgym-eval
 

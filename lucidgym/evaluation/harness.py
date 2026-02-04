@@ -129,6 +129,15 @@ def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
     if not downsample_images and "as66visualmemoryagent" in agent_name:
         tags.append("64x64")
 
+    # Downsample block size and method (for basic_obs_action agents)
+    if "basic_obs_action" in agent_name:
+        block_size = getattr(args, 'downsample_block_size', 4)
+        grid_size = 64 // block_size
+        tags.append(f"{grid_size}x{grid_size}")
+
+        downsample_method = getattr(args, 'downsample_method', 'mode')
+        tags.append(downsample_method)
+
     # Image Detail
     image_detail = args.image_detail_level.lower()
     if image_detail != "low" and "as66visualmemoryagent" in agent_name:
@@ -255,8 +264,6 @@ def evaluate_single_game(
             current_level_metrics.attempts.append(current_attempt_metrics)
             return attempt_end_time
 
-        prev_chat_len = 0  # For delta logging
-
         while total_actions_this_run < max_actions_per_game:
             action_dict = rollout_loop.run_until_complete(agent.call_llm(rollout_engine=rollout_engine))
             action_obj = agent.update_from_model(response=action_dict)
@@ -289,8 +296,8 @@ def evaluate_single_game(
                     f.write(f"{'='*80}\n\n")
 
                     if hasattr(last_step, 'chat_completions') and last_step.chat_completions:
-                        new_messages = last_step.chat_completions[prev_chat_len:]
-                        for msg in new_messages:
+                        # Each step has its own chat_completions list - write all of them
+                        for msg in last_step.chat_completions:
                             role = msg.get('role', 'unknown')
                             content = msg.get('content', '')
                             tool_calls = msg.get('tool_calls', [])
@@ -302,7 +309,6 @@ def evaluate_single_game(
                                     fn = tc.get('function', {}) if isinstance(tc, dict) else {}
                                     f.write(f"Tool: {fn.get('name', tc)}({fn.get('arguments', '')})\n")
                             f.write("\n")
-                        prev_chat_len = len(last_step.chat_completions)
 
             # Log metrics to W&B
             if wandb_run:
@@ -493,6 +499,8 @@ def run_evaluation_task(
                 agent_kwargs["input_mode"] = getattr(args, 'input_mode', 'text_only')
                 agent_kwargs["downsample"] = not getattr(args, 'no_downsample', False)
                 agent_kwargs["representation"] = rep_config
+                agent_kwargs["downsample_block_size"] = getattr(args, 'downsample_block_size', 4)
+                agent_kwargs["use_mode"] = getattr(args, 'downsample_method', 'mode') == 'mode'
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
@@ -553,6 +561,10 @@ def main():
         help="Input modality for agents (default: text_only)")
     parser.add_argument("--no-downsample", dest="no_downsample", action="store_true",
         help="Use full 64x64 grid instead of 16x16 downsampled")
+    parser.add_argument("--downsample-block-size", dest="downsample_block_size", type=int, default=4,
+        choices=[1, 2, 4], help="Block size for downsampling: 4=16x16, 2=32x32, 1=64x64 (default: 4)")
+    parser.add_argument("--downsample-method", dest="downsample_method", default="mode",
+        choices=["mode", "mean"], help="Downsampling method: mode (most frequent) or mean (average)")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
     parser.add_argument("--wandb", dest="use_wandb", action="store_true",

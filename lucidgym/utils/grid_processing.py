@@ -88,18 +88,20 @@ def downsample_blocks(
     return out
 
 
-def downsample_4x4(
+def downsample_grid(
     frame_3d: List[List[List[int]]] | None,
     *,
+    block_size: int = 4,
     take_last_grid: bool = True,
     round_to_int: bool = True,
     use_mode: bool = True,
 ) -> List[List[int]]:
     """
-    Select one 2D grid from the 3D frame list, then 4×4 downsample → 16×16.
+    Select one 2D grid from the 3D frame list, then downsample by block_size.
 
     Args:
         frame_3d: 3D frame data [channels][rows][cols]
+        block_size: Size of blocks for downsampling (4 → 16x16, 2 → 32x32, 1 → 64x64)
         take_last_grid: Use last channel (True) or first (False)
         round_to_int: Round output values to integers
         use_mode: If True, use mode (most frequent); if False, use mean (average)
@@ -109,9 +111,25 @@ def downsample_4x4(
     grid = frame_3d[-1] if take_last_grid else frame_3d[0]
     if not grid or not grid[0]:
         return []
+    if block_size == 1:
+        return grid  # No downsampling needed
     reducer = _mode if use_mode else _mean
-    # type: ignore[return-value]
-    return downsample_blocks(grid, 4, 4, reducer, round_to_int=round_to_int)
+    return downsample_blocks(grid, block_size, block_size, reducer, round_to_int=round_to_int)
+
+
+def downsample_4x4(
+    frame_3d: List[List[List[int]]] | None,
+    *,
+    take_last_grid: bool = True,
+    round_to_int: bool = True,
+    use_mode: bool = True,
+) -> List[List[int]]:
+    """
+    Select one 2D grid from the 3D frame list, then 4×4 downsample → 16×16.
+    Wrapper for downsample_grid with block_size=4.
+    """
+    return downsample_grid(frame_3d, block_size=4, take_last_grid=take_last_grid,
+                           round_to_int=round_to_int, use_mode=use_mode)
 
 
 def generate_numeric_grid_image_bytes(grid: List[List[int]]) -> bytes:

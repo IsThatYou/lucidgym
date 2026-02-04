@@ -1,14 +1,6 @@
 #!/bin/bash
-#SBATCH --job-name=lucidgym_eval
-#SBATCH --partition=common
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --time=24:00:00
-#SBATCH --output=logs/slurm_%j.out
-#SBATCH --error=logs/slurm_%j.err
-
-# Usage: sbatch run_harness_configurable.sbatch [agent] [suite] [num_runs] [max_workers] [max_actions] [model] [reasoning] [block_size] [ds_method]
-# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode
+# Usage: ./run_harness_configurable.sh [agent] [suite] [num_runs] [max_workers] [max_actions] [model] [reasoning] [block_size] [ds_method]
+# Example: ./run_harness_configurable.sh basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode
 
 # Default values
 AGENT=${1:-basic_obs_action_agent_rolling_context}
@@ -24,20 +16,10 @@ DS_METHOD=${9:-mode}      # mode or mean
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-# Load required modules (adjust based on DCC available modules)
-# module load Python/3.10.x  # Uncomment if needed
-
-# Activate micromamba environment
-eval "$(micromamba shell hook --shell bash)"
-micromamba activate lucidgym
-
 # Print environment info for debugging
 echo "=========================================="
 echo "Job started at: $(date)"
 echo "Running on node: $(hostname)"
-echo "Job ID: $SLURM_JOB_ID"
-echo "CPUs allocated: $SLURM_CPUS_PER_TASK"
-echo "Memory allocated: 16G"
 echo "Python version: $(python --version)"
 echo "Working directory: $(pwd)"
 echo "=========================================="

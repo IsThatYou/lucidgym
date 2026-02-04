@@ -49,24 +49,41 @@ VLLM_URL = os.environ.get("VLLM_URL", None)
 def _build_rollout_engine(model_name: str, reasoning_effort: str = "low") -> OpenAIEngine:
     """
     Build a rollout engine mirroring the ARC reference runner defaults.
+
+    Model routing:
+    - "openai/gpt-5" or "openai/..." → OpenRouter API (OPENROUTER_API_KEY)
+    - "gpt-..." → OpenAI API (OPENAI_API_KEY)
+    - Other models → Together API (TOGETHER_API_KEY)
     """
     together_api_key = os.getenv("TOGETHER_API_KEY", "").strip()
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
 
     tokenizer = None
-    api_key = openai_api_key
-    base_url = "https://api.openai.com/v1"
+    api_key = None
+    base_url = None
 
-    # Use Together/Qwen tokenizer when the model is not an OpenAI-prefixed model.
-    if not model_name.startswith("gpt-"):
+    # Route based on model name prefix
+    if model_name.startswith("openai/"):
+        # OpenRouter for "openai/" prefixed models
+        api_key = openrouter_api_key
+        base_url = "https://openrouter.ai/api/v1"
+    elif model_name.startswith("gpt-"):
+        # Direct OpenAI API for "gpt-" prefixed models
+        api_key = openai_api_key
+        base_url = "https://api.openai.com/v1"
+    else:
+        # Together API for other models
         api_key = together_api_key
         base_url = "https://api.together.xyz/v1"
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-235B-A22B-Instruct-2507")
+
+    # Override with VLLM_URL if set
     if VLLM_URL:
         base_url = VLLM_URL
 
     if not api_key:
-        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY or TOGETHER_API_KEY.")
+        raise RuntimeError("No API key found for rollout engine. Set OPENAI_API_KEY, OPENROUTER_API_KEY, or TOGETHER_API_KEY.")
 
     sampling_params = {
         "temperature": 1,
@@ -137,6 +154,9 @@ def _get_agent_tags(agent_name: str, args: argparse.Namespace) -> List[str]:
 
         downsample_method = getattr(args, 'downsample_method', 'mode')
         tags.append(downsample_method)
+
+        if getattr(args, 'click_only', False):
+            tags.append("clickOnly")
 
     # Image Detail
     image_detail = args.image_detail_level.lower()
@@ -501,6 +521,11 @@ def run_evaluation_task(
                 agent_kwargs["representation"] = rep_config
                 agent_kwargs["downsample_block_size"] = getattr(args, 'downsample_block_size', 4)
                 agent_kwargs["use_mode"] = getattr(args, 'downsample_method', 'mode') == 'mode'
+                agent_kwargs["click_only"] = getattr(args, 'click_only', False)
+
+                # Hypothesis agent specific
+                if "hypothesis" in agent_name_cli.lower():
+                    agent_kwargs["hypothesis_update_interval"] = getattr(args, 'hypothesis_update_interval', 5)
 
             if "meta_coding" in agent_name_cli.lower():
                 agent_kwargs["game_id"] = game_id
@@ -565,6 +590,10 @@ def main():
         choices=[1, 2, 4], help="Block size for downsampling: 4=16x16, 2=32x32, 1=64x64 (default: 4)")
     parser.add_argument("--downsample-method", dest="downsample_method", default="mode",
         choices=["mode", "mean"], help="Downsampling method: mode (most frequent) or mean (average)")
+    parser.add_argument("--click-only", dest="click_only", action="store_true",
+        help="Restrict agent to only ACTION6 (click) - no movement actions")
+    parser.add_argument("--hypothesis-update-interval", dest="hypothesis_update_interval", type=int, default=5,
+        help="Update hypotheses every N turns (default: 5, for hypothesis agent)")
     parser.add_argument("--use-general-prompts", dest="use_general_prompts", action="store_true",
         help="Use general learning prompts instead of game-specific prompts")
     parser.add_argument("--wandb", dest="use_wandb", action="store_true",

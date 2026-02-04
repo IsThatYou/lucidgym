@@ -7,8 +7,9 @@
 #SBATCH --output=logs/slurm_%j.out
 #SBATCH --error=logs/slurm_%j.err
 
-# Usage: sbatch run_harness_configurable.sbatch [agent] [suite] [num_runs] [max_workers] [max_actions] [model] [reasoning] [block_size] [ds_method]
-# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode
+# Usage: sbatch run_harness_configurable.sbatch [agent] [suite] [num_runs] [max_workers] [max_actions] [model] [reasoning] [block_size] [ds_method] [click_only]
+# Example: sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode 0
+# Example (click only): sbatch run_harness_configurable.sbatch basic_obs_action_agent_rolling_context debug_suite 3 3 150 openai/gpt-5 low 4 mode 1
 
 # Default values
 AGENT=${1:-basic_obs_action_agent_rolling_context}
@@ -20,6 +21,7 @@ MODEL=${6:-openai/gpt-5-nano}
 REASONING=${7:-high}
 BLOCK_SIZE=${8:-4}        # 4=16x16, 2=32x32, 1=64x64
 DS_METHOD=${9:-mode}      # mode or mean
+CLICK_ONLY=${10:-0}       # 1=click only, 0=all actions
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -51,7 +53,14 @@ echo "  Model: $MODEL"
 echo "  Reasoning Effort: $REASONING"
 echo "  Block Size: $BLOCK_SIZE (4=16x16, 2=32x32, 1=64x64)"
 echo "  Downsample Method: $DS_METHOD"
+echo "  Click Only: $CLICK_ONLY"
 echo "=========================================="
+
+# Build click-only flag
+CLICK_ONLY_FLAG=""
+if [ "$CLICK_ONLY" = "1" ]; then
+    CLICK_ONLY_FLAG="--click-only"
+fi
 
 # Set environment variables
 export PYTHONUNBUFFERED=1
@@ -71,7 +80,8 @@ python -m lucidgym.evaluation.harness \
     --wandb \
     --wandb-project lucidgym-evaluation \
     --weave \
-    --weave-project lucidgym-eval
+    --weave-project lucidgym-eval \
+    $CLICK_ONLY_FLAG
 
 EXIT_CODE=$?
 

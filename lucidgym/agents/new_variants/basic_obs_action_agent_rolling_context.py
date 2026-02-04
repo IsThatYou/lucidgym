@@ -36,8 +36,23 @@ def weave_op(func):
     return func
 
 
-def build_observation_system_text(use_as66_prompts: bool = False):
-    if use_as66_prompts:
+def build_observation_system_text(use_as66_prompts: bool = False, click_only: bool = False):
+    if click_only:
+        # Click-only mode - analyze grid for cell selection
+        return (
+            "You are playing a grid-based puzzle game.\n"
+            "Your task is to analyze the grid and determine which cell to click.\n\n"
+            "The grid uses ASCII characters to represent different elements.\n"
+            "Look for patterns, targets, or interactive elements that should be clicked.\n\n"
+            "For observation, analyze:\n"
+            "1. **FIRST: Review Recent History** - Check which cells you already clicked and whether they caused state changes\n"
+            "2. Identify key elements and patterns in the grid\n"
+            "3. Determine which cell (x=row, y=column) should be clicked next\n\n"
+            "DO NOT call an action tool here - only provide analysis.\n\n"
+            "⚠️ CRITICAL: Check **Recent History** for clicks marked '⚠️ NO STATE CHANGE' - "
+            "those coordinates did nothing. Try DIFFERENT coordinates."
+        )
+    elif use_as66_prompts:
         # AS66-specific rules (generic, no hardcoded integer values)
         return (
             "You are playing a game represented by a 16×16 grid.\n"
@@ -71,8 +86,17 @@ def build_observation_system_text(use_as66_prompts: bool = False):
             "The grid shows the current game state with various symbols representing different game objects."
         )
 
-def build_action_system_text(use_as66_prompts: bool = False):
-    if use_as66_prompts:
+def build_action_system_text(use_as66_prompts: bool = False, click_only: bool = False):
+    if click_only:
+        # Click-only mode - strongly follow observation's recommendation
+        return (
+            "Execute the click recommended in the observation analysis.\n"
+            "Call ACTION6 with the EXACT coordinates from the observation.\n\n"
+            "Available tool:\n"
+            "- ACTION6(x, y): Click cell at row x, column y (0-indexed)\n\n"
+            "⚠️ Use the coordinates specified in the observation. Do NOT change them."
+        )
+    elif use_as66_prompts:
         # AS66-specific action prompt
         return (
             "Select exactly one move by calling a single tool. Do not include prose.\n"
@@ -99,9 +123,9 @@ def _coerce_int(v: Any, default: int = 0) -> int:
         return default
 
 
-def _build_tools() -> list[dict]:
+def _build_tools(click_only: bool = False) -> list[dict]:
     """Build the tool/function definitions for the ARC-AGI-3 API."""
-    return [
+    tools = [
         {
             "type": "function",
             "function": {
@@ -110,62 +134,69 @@ def _build_tools() -> list[dict]:
                 "parameters": {"type": "object", "properties": {}, "required": []},
             },
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION1",
-                "description": "Move Up",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION2",
-                "description": "Move Down",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION3",
-                "description": "Move Left",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION4",
-                "description": "Move Right",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION5",
-                "description": "Spacebar / Enter / No-op",
-                "parameters": {"type": "object", "properties": {}, "required": []},
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ACTION6",
-                "description": "Click at coordinates (x, y)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "x": {"type": "integer", "description": "X coordinate (0-15 for 16x16 cell, or absolute)"},
-                        "y": {"type": "integer", "description": "Y coordinate (0-15 for 16x16 cell, or absolute)"},
-                    },
-                    "required": ["x", "y"],
+    ]
+
+    if not click_only:
+        tools.extend([
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION1",
+                    "description": "Move Up",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION2",
+                    "description": "Move Down",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION3",
+                    "description": "Move Left",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION4",
+                    "description": "Move Right",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ACTION5",
+                    "description": "Spacebar / Enter / No-op",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            },
+        ])
+
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "ACTION6",
+            "description": "Click at coordinates (x, y)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "Row coordinate (0-indexed from top)"},
+                    "y": {"type": "integer", "description": "Column coordinate (0-indexed from left)"},
+                },
+                "required": ["x", "y"],
+            },
         },
-    ]
+    })
+
+    return tools
 
 
 class BasicObsActionAgentRollingContext(ArcAgi3Agent):
@@ -189,6 +220,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         representation: RepresentationConfig | None = None,  # Grid representation config
         downsample_block_size: int = 4,  # Block size: 4=16x16, 2=32x32, 1=64x64
         use_mode: bool = True,  # True=mode (most frequent), False=mean (average)
+        click_only: bool = False,  # Restrict to only ACTION6 (click)
     ) -> None:
         """
         Initialize the agent with rolling context.
@@ -207,6 +239,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             representation: Grid representation config for formatting
             downsample_block_size: Block size for downsampling (4=16x16, 2=32x32, 1=64x64)
             use_mode: Downsampling method - True for mode, False for mean
+            click_only: Restrict agent to only ACTION6 (click) - no movement actions
         """
         # Set context_window_size before calling super().__init__ because parent calls reset()
         self.context_window_size = context_window_size
@@ -214,6 +247,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         self.use_as66_prompts = use_as66_prompts
         self.downsample_block_size = downsample_block_size
         self.use_mode = use_mode
+        self.click_only = click_only
 
         # Store representation to set AFTER super().__init__() since parent also sets self.representation
         _representation = representation or RepresentationConfig(format=GridFormat.ASCII)
@@ -255,18 +289,48 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
         # Track last executed action to prevent double RESETs
         self._last_executed_action: str | None = None
 
+    def _compute_grid_diff(self, old_grid: str, new_grid: str) -> str:
+        """Compute diff between two grids, showing only changed cells."""
+        if not old_grid or not new_grid:
+            return "(no previous state)"
+
+        old_lines = old_grid.strip().split('\n')
+        new_lines = new_grid.strip().split('\n')
+
+        changes = []
+        for row_idx, (old_row, new_row) in enumerate(zip(old_lines, new_lines)):
+            for col_idx, (old_char, new_char) in enumerate(zip(old_row, new_row)):
+                if old_char != new_char:
+                    changes.append(f"({row_idx},{col_idx}): '{old_char}'→'{new_char}'")
+
+        if not changes:
+            return "(no change)"
+        return ", ".join(changes[:10]) + (f" (+{len(changes)-10} more)" if len(changes) > 10 else "")
+
     def _format_step_history(self) -> str:
-        """Format step history as context string."""
+        """Format step history as context string with diffs instead of full grids."""
         if not self._step_history:
             return ""
 
         history_lines = ["**Recent History:**\n"]
+        prev_grid = None
+
         for step_info in self._step_history:
-            duplicate_marker = " ⚠️ NO STATE CHANGE (duplicate)" if step_info.get('no_state_change') else ""
+            duplicate_marker = " ⚠️ NO STATE CHANGE" if step_info.get('no_state_change') else ""
+
+            # Compute diff from previous step
+            current_grid = step_info.get('grid', '')
+            if prev_grid is not None:
+                diff = self._compute_grid_diff(prev_grid, current_grid)
+            else:
+                diff = "(initial state)"
+
             history_lines.append(
-                f"Step {step_info['step']}: Action={step_info['action']}, Score={step_info['score']}, State={step_info['state']}{duplicate_marker}\n"
-                f"Board:\n{step_info['grid']}\n"
+                f"Step {step_info['step']}: {step_info['action']}, Score={step_info['score']}{duplicate_marker}\n"
+                f"  Changes: {diff}\n"
             )
+            prev_grid = current_grid
+
         return "\n".join(history_lines) + "\n"
 
     def _crop_grid(self, grid: List[List[int]]) -> List[List[int]]:
@@ -283,7 +347,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
     @property
     def chat_completions(self) -> list[dict[str, str]]:
         """Return message history formatted for chat API."""
-        system_msg = self._system_prompt_override or build_observation_system_text(self.use_as66_prompts)
+        system_msg = self._system_prompt_override or build_observation_system_text(self.use_as66_prompts, self.click_only)
         messages: list[dict] = [{"role": "system", "content": system_msg}]
         messages.extend(self._chat_history)
         return messages
@@ -366,9 +430,19 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
             if prev_grid == grid_str:
                 no_state_change = True
 
+        # Format action with coordinates for ACTION6
+        action_name = action_dict["name"]
+        if action_name == "ACTION6":
+            data = action_dict.get("data", {})
+            x = data.get("x", 0)
+            y = data.get("y", 0)
+            action_display = f"ACTION6(x={x}, y={y})"
+        else:
+            action_display = action_name
+
         self._step_history.append({
             "step": self._action_counter,
-            "action": action_dict["name"],
+            "action": action_display,
             "score": obs.get("score", 0),
             "state": obs.get("state", "UNKNOWN"),
             "grid": grid_str,
@@ -448,7 +522,7 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
     @weave_op
     async def _call_observation_model(self, grid: List[List[int]], score: int, rollout_engine=None) -> str:
         """Call the model for observation/reasoning phase."""
-        sys_msg = build_observation_system_text(self.use_as66_prompts)
+        sys_msg = build_observation_system_text(self.use_as66_prompts, self.click_only)
 
         if self.downsample:
             # Calculate grid size based on block size: 64/4=16, 64/2=32, 64/1=64
@@ -491,23 +565,30 @@ class BasicObsActionAgentRollingContext(ArcAgi3Agent):
     @weave_op
     async def _call_action_model(self, grid: List[List[int]], last_obs: str, rollout_engine=None) -> dict:
         """Call the model for action selection phase."""
-        sys_msg = build_action_system_text(self.use_as66_prompts)
+        sys_msg = build_action_system_text(self.use_as66_prompts, self.click_only)
 
         history_context = self._format_step_history()
 
-        user_msg_text = (
-            f"{history_context}"
-            "Based on the history above, choose a move that will actually change the state.\n"
-            "Choose the best single move as a function call.\n"
-            f"{grid}"
-            "Previous observation summary:\n"
-            f"{last_obs}\n"
-        )
+        if self.click_only:
+            user_msg_text = (
+                f"{history_context}"
+                f"**Observation Analysis:**\n{last_obs}\n\n"
+                "Execute ACTION6 with the EXACT coordinates recommended above."
+            )
+        else:
+            user_msg_text = (
+                f"{history_context}"
+                "Based on the history above, choose a move that will actually change the state.\n"
+                "Choose the best single move as a function call.\n"
+                f"{grid}"
+                "Previous observation summary:\n"
+                f"{last_obs}\n"
+            )
 
         # Store prompt for logging
         self._last_action_prompt = f"SYSTEM: {sys_msg}\n\nUSER: {user_msg_text}"
 
-        tools = _build_tools()
+        tools = _build_tools(click_only=self.click_only)
 
         # Use text-only content for rollout engine (multimodal not supported)
         messages = [
